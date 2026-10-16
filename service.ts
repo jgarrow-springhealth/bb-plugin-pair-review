@@ -69,6 +69,7 @@ import {
   unchanged,
 } from "./engine/data.ts";
 import { run, launch, cancelEntry, cleanEnv } from "./engine/process.ts";
+import { cachedLogin, cachedPatch } from "./cache.ts";
 import {
   Envelope,
   verifySaved,
@@ -521,13 +522,22 @@ async function currentPullRequest(
   boundCache(pullRequestTargetCache);
   return target;
 }
-async function pullRequestPatch(github: GitHub, target: PullRequest) {
+async function pullRequestPatch(
+  github: GitHub,
+  target: PullRequest,
+  cacheDir: string,
+) {
   const key = `${target.host}/${target.owner}/${target.repo}/${target.baseSha}/${target.headSha}`;
   const cached = pullRequestPatchCache.get(key);
   if (cached !== undefined) return cached;
-  const patch = await github.diff(target);
-  if (Buffer.byteLength(patch, "utf8") > MAX_PAGE_PATCH_BYTES)
-    throw Error("Diff exceeds the 4 MiB page limit");
+  // Each request is a fresh process, so the in-memory map above rarely hits.
+  // The diff for these exact commits never changes, so keep it on disk too.
+  const patch = await cachedPatch(cacheDir, key, async () => {
+    const fetched = await github.diff(target);
+    if (Buffer.byteLength(fetched, "utf8") > MAX_PAGE_PATCH_BYTES)
+      throw Error("Diff exceeds the 4 MiB page limit");
+    return fetched;
+  });
   pullRequestPatchCache.set(key, patch);
   boundCache(pullRequestPatchCache);
   return patch;
@@ -688,6 +698,7 @@ export async function invoke(request: Request) {
   });
   const github = new GitHub(p.hostname);
   const root = privateDir(ROOT);
+  const cacheDir = dismissalDirectory(root);
   const cachedFeedback = async (target: PullRequest) => {
     const path = join(
       dismissalDirectory(root),
@@ -985,7 +996,8 @@ export async function invoke(request: Request) {
     case "snapshot":
       return snapshot();
     case "refresh": {
-      const login = await github.login();
+      // Discovery only; authorization checks elsewhere still ask GitHub.
+      const login = await cachedLogin(github, cacheDir, p.hostname);
       const tags = new Map<string, Set<string>>(),
         targets = new Map<string, any>();
       const add = (t: any, tag: string) => {
@@ -1171,7 +1183,7 @@ export async function invoke(request: Request) {
       let patches: Details["patches"] = [],
         patchError: string | null = null;
       try {
-        patches = splitPatch(await pullRequestPatch(github, target));
+        patches = splitPatch(await pullRequestPatch(github, target, cacheDir));
       } catch (error) {
         patchError = clean(error);
       }
@@ -1194,7 +1206,8 @@ export async function invoke(request: Request) {
             reason: null,
           })),
         };
-        const login = await github.login();
+        // Display only: resolverStart re-checks ownership with a fresh login.
+        const login = await cachedLogin(github, cacheDir, p.hostname);
         canResolve = owned(target, login) && value.comments.length > 0;
       } catch (error) {
         feedback.error = clean(error);
@@ -1240,7 +1253,7 @@ export async function invoke(request: Request) {
       } catch {}
       if (capturedPatch === null && e.target.kind === "pr")
         try {
-          capturedPatch = await pullRequestPatch(github, e.target);
+          capturedPatch = await pullRequestPatch(github, e.target, cacheDir);
           changes = patchStats(capturedPatch);
         } catch {}
       if (capturedPatch !== null) patches = splitPatch(capturedPatch);

@@ -62,19 +62,9 @@ import { FindingsReport, isPraise } from "./ui/findings";
 import { IconAction, Picker, TooltipProvider } from "./ui/controls";
 type PageData = Snapshot & { hostId: string; preferences: Preferences };
 type OverviewTab =
-  | "queue"
-  | "running"
-  | "attention"
-  | "final"
-  | "recent"
-  | "dismissed";
+  "queue" | "running" | "attention" | "final" | "recent" | "dismissed";
 type DetailTab =
-  | "findings"
-  | "changes"
-  | "feedback"
-  | "activity"
-  | "history"
-  | "resolver";
+  "findings" | "changes" | "feedback" | "activity" | "history" | "resolver";
 /** The overview tab survives a trip to Details and back. */
 let lastOverviewTab: OverviewTab = "queue";
 /** Queue composition, most team-relevant first; a PR counts under its first match. */
@@ -623,6 +613,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     [selectedFile, setSelectedFile] = useState(""),
     [resolverDialogOpen, setResolverDialogOpen] = useState(false),
     [localOpen, setLocalOpen] = useState(false);
+  const reloadDetailsRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let live = true;
     setDetails(null);
@@ -638,24 +629,43 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     setPrBriefing(null);
     if (!detailOpen) return;
     let loading = false;
+    // A PR page asks GitHub once when it opens, and again only on request or
+    // when this PR's local review changes. The 3-second poll below reads local
+    // state only, so an open tab never spends API quota.
+    let fetchPr = true,
+      prFailed = false,
+      prTarget: { batchId: string; index: number } | null = null;
+    const watchesPr = !!prUrl && !activeStartedSelection;
     const load = async () => {
       if (loading) return;
+      if (watchesPr && prFailed && !fetchPr) return;
       loading = true;
       try {
         let target = activeStartedSelection ?? batchSelection;
         let availablePrPatches: Details["patches"] = [];
-        if (prUrl && !activeStartedSelection) {
-          const result = await rpc.call("prDetails", { url: prUrl });
-          if (!live) return;
-          setPrInfo(result.pr);
-          availablePrPatches = result.patches;
-          setPrPatches(availablePrPatches);
-          setPrPatchError(result.patchError);
-          setPrFeedback(result.feedback);
-          setPrCanResolve(result.canResolve);
-          setPrBriefing(result.briefing);
-          setResolvedSelection(result.review);
-          target = result.review;
+        if (watchesPr) {
+          if (fetchPr) {
+            fetchPr = false;
+            prFailed = false;
+            let result: Awaited<ReturnType<typeof rpc.call<"prDetails">>>;
+            try {
+              result = await rpc.call("prDetails", { url: prUrl! });
+            } catch (e) {
+              prFailed = true;
+              throw e;
+            }
+            if (!live) return;
+            setPrInfo(result.pr);
+            availablePrPatches = result.patches;
+            setPrPatches(availablePrPatches);
+            setPrPatchError(result.patchError);
+            setPrFeedback(result.feedback);
+            setPrCanResolve(result.canResolve);
+            setPrBriefing(result.briefing);
+            setResolvedSelection(result.review);
+            prTarget = result.review;
+          }
+          target = prTarget;
         }
         const value = target ? await rpc.call("details", target) : null;
         if (live) {
@@ -679,13 +689,44 @@ function PairReviewPage({ subPath }: { subPath: string }) {
         loading = false;
       }
     };
+    reloadDetailsRef.current = () => {
+      fetchPr = true;
+      void load();
+    };
     void load();
     const timer = setInterval(() => void load(), 3000);
     return () => {
       live = false;
+      reloadDetailsRef.current = null;
       clearInterval(timer);
     };
   }, [rpc, subPath, activeStartedSelection?.batchId]);
+  const prKey = prMatch
+    ? `${prMatch[1]}/${prMatch[2]}/${prMatch[3]}#${prMatch[4]}`.toLowerCase()
+    : null;
+  const reviewSignature =
+    prKey && data
+      ? data.rows
+          .filter((r) => r.key === prKey)
+          .map(
+            (r) =>
+              `${r.id}:${r.reviewState}:${r.running}:${r.dismissed}:${r.superseded}`,
+          )
+          .join("|")
+      : null;
+  const seenReviewSignature = useRef<{ key: string; signature: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!prKey || reviewSignature === null) {
+      seenReviewSignature.current = null;
+      return;
+    }
+    const seen = seenReviewSignature.current;
+    seenReviewSignature.current = { key: prKey, signature: reviewSignature };
+    if (seen && seen.key === prKey && seen.signature !== reviewSignature)
+      reloadDetailsRef.current?.();
+  }, [prKey, reviewSignature]);
   const run = async (key: string, fn: () => Promise<unknown>) => {
     if (busy) return;
     setActionError("");
@@ -721,10 +762,19 @@ function PairReviewPage({ subPath }: { subPath: string }) {
       setQueueLoading(false);
     }
   }, [rpc, hostname, teams, teammates]);
+  // Opening the page shows the last saved queue and its age; GitHub is asked
+  // again only on request. The exception is a first run, or settings (host,
+  // teams, teammates) that changed so the saved queue no longer applies.
+  const needsFirstRefresh =
+    !!hostname && data != null && data.queueRefreshedAt == null;
   useEffect(() => {
-    if (!hostname) return;
+    if (needsFirstRefresh) void refreshQueue();
+  }, [needsFirstRefresh, refreshQueue]);
+  // A details page refreshes the queue and then re-reads its own PR.
+  const refreshFromGitHub = () => {
     void refreshQueue();
-  }, [hostname, refreshQueue]);
+    reloadDetailsRef.current?.();
+  };
   const previousHostname = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (
@@ -1390,7 +1440,9 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     disabled={!!busy || queueLoading}
                     onClick={() => void refreshQueue()}
                   >
-                    {queueLoading ? "Refreshing GitHub…" : "Refresh from GitHub"}
+                    {queueLoading
+                      ? "Refreshing GitHub…"
+                      : "Refresh from GitHub"}
                   </Action>
                 </form>
                 <div className="pr-quick-start-meta">
@@ -1787,11 +1839,13 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                           ? "Loading your GitHub PR queue…"
                           : queueError
                             ? "PR discovery failed. Retry above; no partial queue was saved."
-                            : search
-                              ? "No matching PRs."
-                              : queue.length
-                                ? "No PRs match this filter."
-                                : "No open PRs match your review requests, assignments, or authorship. Current reviews may be hidden in settings."}
+                            : data.queueRefreshedAt == null
+                              ? "No saved queue yet. Choose Refresh from GitHub to load your pull requests."
+                              : search
+                                ? "No matching PRs."
+                                : queue.length
+                                  ? "No PRs match this filter."
+                                  : "No open PRs match your review requests, assignments, or authorship. Current reviews may be hidden in settings."}
                       </Empty>
                     )}
                   </section>
@@ -1911,9 +1965,16 @@ function PairReviewPage({ subPath }: { subPath: string }) {
               </p>
             )}
             {detailsError && (
-              <p role="alert" className="pr-error text-destructive">
-                {detailsError}
-              </p>
+              <div role="alert" className="pr-error text-destructive">
+                <p>{detailsError}</p>
+                <Action
+                  variant="outline"
+                  size="sm"
+                  onClick={() => reloadDetailsRef.current?.()}
+                >
+                  Retry
+                </Action>
+              </div>
             )}
             {(!data || (!details && !prInfo)) && !detailsError && (
               <Empty>Loading review details…</Empty>
@@ -1984,7 +2045,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       variant="ghost"
                       icon="RotateCcw"
                       disabled={queueLoading}
-                      onClick={() => void refreshQueue()}
+                      onClick={refreshFromGitHub}
                     >
                       {queueLoading
                         ? "Refreshing GitHub…"
@@ -2225,7 +2286,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                         variant="ghost"
                         icon="RotateCcw"
                         disabled={queueLoading}
-                        onClick={() => void refreshQueue()}
+                        onClick={refreshFromGitHub}
                       >
                         {queueLoading
                           ? "Refreshing GitHub…"

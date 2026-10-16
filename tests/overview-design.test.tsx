@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import "./picker";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
@@ -286,8 +286,16 @@ test("icon-only actions explain themselves in a tooltip, even when disabled", as
   ).toBe("Review latest changes");
 });
 
-test("the header always shows the last completed GitHub refresh", async () => {
-  const app = await loadPluginApp(() => import("../app"));
+/** Module state (the cached snapshot) must not leak between these tests. */
+async function freshApp() {
+  vi.resetModules();
+  return loadPluginApp(() => import("../app"));
+}
+const calls = (method: string) =>
+  slot.inspection.rpcCalls.filter((call) => call.method === method);
+
+test("opening the page uses the saved queue and does not ask GitHub", async () => {
+  const app = await freshApp();
   const refreshedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
   const page = { ...snapshot, queueRefreshedAt: refreshedAt };
   let finishRefresh!: () => void;
@@ -297,8 +305,6 @@ test("the header always shows the last completed GitHub refresh", async () => {
     {
       rpc: {
         snapshot: () => page,
-        // Hold the automatic refresh open: the disabled button says it is
-        // running, while the header keeps the last completed refresh.
         refresh: () =>
           new Promise((resolve) => {
             finishRefresh = () => resolve(page);
@@ -308,11 +314,22 @@ test("the header always shows the last completed GitHub refresh", async () => {
   );
   const label = await slot.findByText("Refreshed 5 minutes ago");
   expect(label.getAttribute("title")).toMatch(/^Last refreshed /);
-  expect(
-    slot
-      .getByRole("button", { name: "Refreshing GitHub…" })
-      .hasAttribute("disabled"),
-  ).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(calls("refresh")).toHaveLength(0);
+  fireEvent.click(slot.getByRole("tab", { name: /^PR Queue/ }));
+  expect(slot.queryByText(/No saved queue yet/)).toBeNull();
+
+  // Refreshing is the user's call. While it runs the button says so, and the
+  // header keeps showing the last completed refresh.
+  fireEvent.click(slot.getByRole("button", { name: "Refresh from GitHub" }));
+  await waitFor(() =>
+    expect(
+      slot
+        .getByRole("button", { name: "Refreshing GitHub…" })
+        .hasAttribute("disabled"),
+    ).toBe(true),
+  );
+  expect(slot.getByText("Refreshed 5 minutes ago")).toBeTruthy();
   expect(slot.queryByText("Refreshing from GitHub…")).toBeNull();
   finishRefresh();
   await waitFor(() =>
@@ -322,8 +339,31 @@ test("the header always shows the last completed GitHub refresh", async () => {
         .hasAttribute("disabled"),
     ).toBe(false),
   );
-  expect(slot.getByText("Refreshed 5 minutes ago")).toBeTruthy();
+  expect(calls("refresh")).toHaveLength(1);
 });
+
+test("with no saved queue it asks GitHub once, even as the page keeps polling", async () => {
+  const app = await freshApp();
+  slot = renderSlot(
+    app.navPanels[0],
+    { subPath: "" },
+    {
+      rpc: {
+        snapshot: () => snapshot,
+        // Fails like a rate limit: there must be no retry loop.
+        refresh: () => {
+          throw Error("gh: API rate limit exceeded");
+        },
+      },
+    },
+  );
+  await slot.findByText(/GitHub queue could not be refreshed/);
+  await slot.behavior.emitRealtime("changed", {});
+  await new Promise((resolve) => setTimeout(resolve, 3400));
+  expect(calls("refresh")).toHaveLength(1);
+  // The failure stays visible, with an explicit retry instead of an automatic one.
+  expect(slot.getByRole("button", { name: "Retry PR discovery" })).toBeTruthy();
+}, 10_000);
 
 test("the header admits when the queue has never been refreshed", async () => {
   const app = await loadPluginApp(() => import("../app"));

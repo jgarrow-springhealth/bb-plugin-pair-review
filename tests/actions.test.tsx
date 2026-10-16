@@ -973,9 +973,9 @@ test("a PR detail route reuses existing saved review details, without analysis",
   );
   await slot.findByText("Previously saved verified summary");
   // A retained review opens on its findings; the diff is one tab away.
-  expect(
-    (await openTab("Findings")).getAttribute("aria-selected"),
-  ).toBe("true");
+  expect((await openTab("Findings")).getAttribute("aria-selected")).toBe(
+    "true",
+  );
   expect(
     slot.getByText("src/features/reviews/very-specific-review-file.ts"),
   ).toBeTruthy();
@@ -1039,17 +1039,16 @@ test("a PR detail route reuses existing saved review details, without analysis",
       location: null,
     },
   });
-  fireEvent.click(
-    slot.getByRole("button", { name: "Open briefing thread" }),
-  );
+  fireEvent.click(slot.getByRole("button", { name: "Open briefing thread" }));
   expect(slot.inspection.navigateCalls).toContainEqual({
     method: "toThread",
     threadId: "briefing-thread",
   });
   await new Promise((r) => setTimeout(r, 100));
+  // Opened once; the explicit Refresh asked GitHub about this PR once more.
   expect(
     slot.inspection.rpcCalls.filter((c) => c.method === "prDetails"),
-  ).toHaveLength(1);
+  ).toHaveLength(2);
   expect(
     slot.inspection.rpcCalls.find((c) => c.method === "details")?.input,
   ).toEqual(selection);

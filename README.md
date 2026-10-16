@@ -47,7 +47,7 @@ bb plugin reload pair-review
 
 ## Open and use Pair Review
 
-1. Open **Pair Review** in the BB sidebar. Discovery runs automatically; **Refresh** repeats the read-only GitHub queries.
+1. Open **Pair Review** in the BB sidebar. It shows the last saved queue and how long ago it was refreshed. **Refresh from GitHub** repeats the read-only GitHub queries when you want newer results. The first run, and a change to the host, teams, or teammates settings, refresh automatically because no saved queue applies.
 2. Filter by request type, repository, or text. Choose **Details** to inspect the patch without starting a review.
 3. Choose **Review latest changes**, paste explicit PR URLs, or select several queue items and choose **Review selected**.
 4. Open **Details** to inspect findings, source patches, saved feedback, and run activity. **Open Pair Review** opens the verified native run.
@@ -82,7 +82,7 @@ Plugin settings choose the review and resolver providers and models. When presen
 
 ## Permissions, data, and external services
 
-- **GitHub:** discovery, PR metadata, diffs, and feedback use authenticated `gh` API reads. Normal review execution does not submit reviews, comments, resolve threads, edit PR metadata, or merge. Enabling publication does not bypass the separate final confirmation and ref/ownership checks.
+- **GitHub:** discovery, PR metadata, diffs, and feedback use authenticated `gh` API reads. Plugin pages spend GitHub API quota only when you ask: opening Overview or leaving a PR page open makes no GitHub calls, and **Refresh from GitHub** is the explicit way to re-read. One full queue refresh makes roughly one API call per pull request plus a few searches, so refresh on demand rather than repeatedly. The signed-in login and each compare diff are remembered on disk (the diff by its exact commits, so it never goes stale) to avoid repeat calls. Normal review execution does not submit reviews, comments, resolve threads, edit PR metadata, or merge. Enabling publication does not bypass the separate final confirmation and ref/ownership checks.
 - **Local processes and files:** the trusted host worker runs the configured installed Pair Review command or local fork and uses Git in isolated retained directories. Evidence and checkouts live under `~/.pair-review/pi-batches`; Pair Review keeps its own configuration and database under `~/.pair-review`.
 - **Model provider:** native reviews use Pair Review's selected provider adapter. The resolver uses Pi's constrained SDK tools or a Claude/Codex agent rooted in a sanitized temporary source copy; only validated existing-file edits are applied to the retained checkout. Claude runs in restricted mode with only read/edit tools. Codex runs under its `workspace-write` sandbox, which blocks writes outside the copy and direct network access but may allow read-only host paths according to the installed Codex policy. Provider credentials remain in native stores, not BB plugin settings.
 - **Optional BB plugins:** PR Briefings and Projects & Sections add integrations when installed; Pair Review works without them.
