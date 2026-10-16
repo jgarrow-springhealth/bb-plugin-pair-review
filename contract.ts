@@ -411,6 +411,11 @@ export const actionSchema = selection.extend({
   ]),
   confirmed: z.boolean().default(false),
 });
+const limitBucket = z.object({
+  limit: z.number().int().nonnegative(),
+  remaining: z.number().int(),
+  resetAt: z.string(),
+});
 export const rpcContract = defineRpcContract({
   snapshot: {
     input: z.null(),
@@ -464,6 +469,14 @@ export const rpcContract = defineRpcContract({
     output: detailsSchema.shape.briefing,
   },
   settings: { input: Preferences, output: Preferences },
+  rateLimit: {
+    input: z.null(),
+    output: z.object({
+      core: limitBucket.nullable(),
+      search: limitBucket.nullable(),
+      graphql: limitBucket.nullable(),
+    }),
+  },
   resetSettings: { input: z.null(), output: Preferences },
   openFork: {
     input: z.union([
@@ -489,6 +502,7 @@ export const hostContract = defineRpcContract({
           "resolverStart",
           "action",
           "openFork",
+          "rateLimit",
         ]),
         payload: z.unknown().optional(),
       })

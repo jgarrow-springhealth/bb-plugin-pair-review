@@ -137,9 +137,21 @@ export function normalizePR(
 export function owned(t: Target, login: string) {
   return t.kind === "branch" || t.author.toLowerCase() === login.toLowerCase();
 }
+/**
+ * Pull requests looked up before, keyed by URL and the "updated" time GitHub
+ * listed them with. A listing whose time is unchanged reuses the earlier
+ * lookup instead of spending an API call on it.
+ */
+export interface KnownPullRequests {
+  get(url: string, listedUpdatedAt: string): PullRequest | undefined;
+  remember(url: string, listedUpdatedAt: string, target: PullRequest): void;
+}
 export class GitHub {
   host: string;
   exec: Run;
+  /** Queue discovery only. Reviews always hydrate the live pull request. */
+  known?: KnownPullRequests;
+  private listed = new Map<string, Promise<PullRequest>>();
   constructor(host = "github.com", exec: Run = run) {
     this.host = Host.parse(host);
     this.exec = exec;
@@ -162,6 +174,19 @@ export class GitHub {
   async login() {
     return Coordinate.parse((await this.api("user")).login);
   }
+  /** Remaining API budgets. GitHub does not count this call against them. */
+  async rateLimit() {
+    return JSON.parse(
+      await this.exec("gh", [
+        "api",
+        "--hostname",
+        this.host,
+        "--method",
+        "GET",
+        "rate_limit",
+      ]),
+    );
+  }
   async hydrate(url: string) {
     const c = parseURL(url, this.host);
     return normalizePR(
@@ -169,6 +194,27 @@ export class GitHub {
       url,
       this.host,
     );
+  }
+  /**
+   * Hydrate a pull request found by a search. Reuses a known lookup when
+   * GitHub lists it with the same updated time, and looks each pull request
+   * up at most once per client even when several searches return it.
+   */
+  hydrateListed(url: string, listedUpdatedAt?: string | null) {
+    const known = listedUpdatedAt
+      ? this.known?.get(url, listedUpdatedAt)
+      : undefined;
+    if (known) return Promise.resolve(known);
+    let pending = this.listed.get(url);
+    if (!pending) {
+      pending = this.hydrate(url).then((target) => {
+        if (listedUpdatedAt) this.known?.remember(url, listedUpdatedAt, target);
+        return target;
+      });
+      pending.catch(() => this.listed.delete(url));
+      this.listed.set(url, pending);
+    }
+    return pending;
   }
   async diff(target: PullRequest) {
     const t = PR.parse(target);
@@ -222,7 +268,12 @@ export class GitHub {
         .object({
           total_count: z.number().int(),
           incomplete_results: z.literal(false),
-          items: z.array(z.object({ html_url: z.string() })),
+          items: z.array(
+            z.object({
+              html_url: z.string(),
+              updated_at: z.string().nullable().optional(),
+            }),
+          ),
         })
         .parse(
           await this.api(
@@ -230,7 +281,9 @@ export class GitHub {
           ),
         );
       found.push(
-        ...(await mapConcurrent(r.items, 4, (x) => this.hydrate(x.html_url))),
+        ...(await mapConcurrent(r.items, 4, (x) =>
+          this.hydrateListed(x.html_url, x.updated_at),
+        )),
       );
       if (found.length >= r.total_count) return this.history(found, root);
       if (!r.items.length) throw Error("Incomplete GitHub discovery");

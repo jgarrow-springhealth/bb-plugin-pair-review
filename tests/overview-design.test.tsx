@@ -350,9 +350,9 @@ test("with no saved queue it asks GitHub once, even as the page keeps polling", 
     {
       rpc: {
         snapshot: () => snapshot,
-        // Fails like a rate limit: there must be no retry loop.
+        // A failing refresh must never turn into a retry loop.
         refresh: () => {
-          throw Error("gh: API rate limit exceeded");
+          throw Error("gh: Bad credentials (HTTP 401)");
         },
       },
     },

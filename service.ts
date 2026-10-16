@@ -69,7 +69,8 @@ import {
   unchanged,
 } from "./engine/data.ts";
 import { run, launch, cancelEntry, cleanEnv } from "./engine/process.ts";
-import { cachedLogin, cachedPatch } from "./cache.ts";
+import { cachedLogin, cachedPatch, knownPullRequests } from "./cache.ts";
+import { parseRateLimit } from "./github-limits.ts";
 import {
   Envelope,
   verifySaved,
@@ -995,9 +996,15 @@ export async function invoke(request: Request) {
   switch (request.operation) {
     case "snapshot":
       return snapshot();
+    case "rateLimit":
+      return parseRateLimit(await github.rateLimit());
     case "refresh": {
       // Discovery only; authorization checks elsewhere still ask GitHub.
       const login = await cachedLogin(github, cacheDir, p.hostname);
+      // Reuse lookups of pull requests GitHub lists as unchanged since the last
+      // refresh. Reviews always hydrate the live pull request themselves.
+      const known = knownPullRequests(cacheDir, p.hostname);
+      github.known = known;
       const tags = new Map<string, Set<string>>(),
         targets = new Map<string, any>();
       const add = (t: any, tag: string) => {
@@ -1030,7 +1037,10 @@ export async function invoke(request: Request) {
           "Assigned PR discovery is incomplete; no partial queue was saved",
         );
       for (const t of await mapConcurrent(assigned.items, 4, (x: any) =>
-        github.hydrate(x.html_url),
+        github.hydrateListed(
+          x.html_url,
+          typeof x.updated_at === "string" ? x.updated_at : null,
+        ),
       ))
         add(t, "Assigned");
       const items = github.history([...targets.values()], root).map((t) => ({
@@ -1061,6 +1071,7 @@ export async function invoke(request: Request) {
         items,
         at: now(),
       });
+      known.save();
       return snapshot();
     }
     case "preview": {

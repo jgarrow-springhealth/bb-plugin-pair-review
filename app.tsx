@@ -60,6 +60,12 @@ import {
 } from "./ui/kit";
 import { FindingsReport, isPraise } from "./ui/findings";
 import { IconAction, Picker, TooltipProvider } from "./ui/controls";
+import {
+  describeReset,
+  isRateLimitError,
+  limitStatus,
+  type GitHubLimits,
+} from "./github-limits";
 type PageData = Snapshot & { hostId: string; preferences: Preferences };
 type OverviewTab =
   "queue" | "running" | "attention" | "final" | "recent" | "dismissed";
@@ -454,6 +460,37 @@ function Action({
     </Button>
   );
 }
+/** GitHub refused a request for rate limiting: say when it lifts, calmly. */
+function RateLimitNotice({
+  status,
+  what,
+  action,
+}: {
+  status: { resetAt: string | null; secondary: boolean } | null;
+  what: string;
+  action?: ReactNode;
+}) {
+  return (
+    <Callout
+      tone="warn"
+      role="alert"
+      title={
+        status?.secondary
+          ? "GitHub asked Pair Review to slow down"
+          : "GitHub's API rate limit is used up"
+      }
+    >
+      <p>
+        {status?.resetAt
+          ? `It resets at ${describeReset(status.resetAt)}. ${what}`
+          : status?.secondary
+            ? `Wait a few minutes before trying again. ${what}`
+            : `Checking when it resets… ${what}`}
+      </p>
+      {action}
+    </Callout>
+  );
+}
 function ResolverLoopDialog({
   open,
   defaultRounds,
@@ -614,6 +651,39 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     [resolverDialogOpen, setResolverDialogOpen] = useState(false),
     [localOpen, setLocalOpen] = useState(false);
   const reloadDetailsRef = useRef<(() => void) | null>(null);
+  // Set when GitHub rate-limits a request; cleared once a request succeeds.
+  const [githubLimit, setGithubLimit] = useState<{
+    resetAt: string | null;
+    secondary: boolean;
+  } | null>(null);
+  const [githubLimits, setGithubLimits] = useState<GitHubLimits | null>(null);
+  // Reading the limits is free: GitHub does not count this call.
+  const noteRateLimit = useCallback(
+    async (error: unknown) => {
+      if (!isRateLimitError(error)) return;
+      setGithubLimit(
+        (current) => current ?? { resetAt: null, secondary: false },
+      );
+      try {
+        const limits = await rpc.call("rateLimit");
+        setGithubLimits(limits);
+        setGithubLimit(limitStatus(limits));
+      } catch {
+        setGithubLimit({ resetAt: null, secondary: true });
+      }
+    },
+    [rpc],
+  );
+  const limitedUntil =
+    githubLimit?.resetAt && Date.parse(githubLimit.resetAt) > Date.now()
+      ? githubLimit.resetAt
+      : null;
+  const refreshLabel = (loading: boolean) =>
+    loading
+      ? "Refreshing GitHub…"
+      : limitedUntil
+        ? `Refresh after ${new Date(limitedUntil).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+        : "Refresh from GitHub";
   useEffect(() => {
     let live = true;
     setDetails(null);
@@ -684,7 +754,10 @@ function PairReviewPage({ subPath }: { subPath: string }) {
           setDetailsError("");
         }
       } catch (e) {
-        if (live) setDetailsError(String(e));
+        if (live) {
+          setDetailsError(String(e));
+          void noteRateLimit(e);
+        }
       } finally {
         loading = false;
       }
@@ -756,12 +829,14 @@ function PairReviewPage({ subPath }: { subPath: string }) {
         current.preferences.teammates === teammates
       )
         acceptData({ ...current, ...value });
+      setGithubLimit(null);
     } catch (e) {
       setQueueError(String(e));
+      void noteRateLimit(e);
     } finally {
       setQueueLoading(false);
     }
-  }, [rpc, hostname, teams, teammates]);
+  }, [rpc, hostname, teams, teammates, noteRateLimit]);
   // Opening the page shows the last saved queue and its age; GitHub is asked
   // again only on request. The exception is a first run, or settings (host,
   // teams, teammates) that changed so the saved queue no longer applies.
@@ -770,6 +845,18 @@ function PairReviewPage({ subPath }: { subPath: string }) {
   useEffect(() => {
     if (needsFirstRefresh) void refreshQueue();
   }, [needsFirstRefresh, refreshQueue]);
+  // Setup health shows the remaining budget; reading it costs no quota.
+  useEffect(() => {
+    if (!healthOpen) return;
+    let live = true;
+    rpc
+      .call("rateLimit")
+      .then((limits) => live && setGithubLimits(limits))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [healthOpen, rpc]);
   // A details page refreshes the queue and then re-reads its own PR.
   const refreshFromGitHub = () => {
     void refreshQueue();
@@ -1437,12 +1524,10 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     variant="outline"
                     size="sm"
                     icon="RotateCcw"
-                    disabled={!!busy || queueLoading}
+                    disabled={!!busy || queueLoading || !!limitedUntil}
                     onClick={() => void refreshQueue()}
                   >
-                    {queueLoading
-                      ? "Refreshing GitHub…"
-                      : "Refresh from GitHub"}
+                    {refreshLabel(queueLoading)}
                   </Action>
                 </form>
                 <div className="pr-quick-start-meta">
@@ -1716,7 +1801,16 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       Review requests, assigned PRs, and authored PRs not
                       already represented in another list.
                     </p>
-                    {queueError && (
+                    {queueError && isRateLimitError(queueError) ? (
+                      <RateLimitNotice
+                        status={githubLimit}
+                        what={
+                          data?.queueRefreshedAt
+                            ? "The queue below is from your last refresh."
+                            : "Refresh then to load your pull requests."
+                        }
+                      />
+                    ) : queueError ? (
                       <div
                         className="pr-error text-destructive border border-border"
                         role="alert"
@@ -1731,7 +1825,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                           Retry PR discovery
                         </Action>
                       </div>
-                    )}
+                    ) : null}
                     <div className="pr-toolbar" aria-label="PR queue filters">
                       <div
                         className="pr-filters"
@@ -1940,6 +2034,18 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                             "Database",
                             `Shared${data.health.port ? ` · port ${data.health.port}` : ""}`,
                           ],
+                          [
+                            "GitHub API",
+                            githubLimits?.core
+                              ? `${githubLimits.core.remaining.toLocaleString()} of ${githubLimits.core.limit.toLocaleString()} requests left · resets ${describeReset(githubLimits.core.resetAt)}`
+                              : "Checking…",
+                          ],
+                          [
+                            "GitHub search",
+                            githubLimits?.search
+                              ? `${githubLimits.search.remaining} of ${githubLimits.search.limit} searches left · resets ${describeReset(githubLimits.search.resetAt)}`
+                              : "Checking…",
+                          ],
                         ]}
                       />
                     </div>
@@ -1964,7 +2070,24 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                 {actionError}
               </p>
             )}
-            {detailsError && (
+            {detailsError && isRateLimitError(detailsError) ? (
+              <RateLimitNotice
+                status={githubLimit}
+                what="This page loads once it can reach GitHub again."
+                action={
+                  <div className="pr-actions">
+                    <Action
+                      variant="outline"
+                      size="sm"
+                      disabled={!!limitedUntil}
+                      onClick={() => reloadDetailsRef.current?.()}
+                    >
+                      Retry
+                    </Action>
+                  </div>
+                }
+              />
+            ) : detailsError ? (
               <div role="alert" className="pr-error text-destructive">
                 <p>{detailsError}</p>
                 <Action
@@ -1975,7 +2098,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                   Retry
                 </Action>
               </div>
-            )}
+            ) : null}
             {(!data || (!details && !prInfo)) && !detailsError && (
               <Empty>Loading review details…</Empty>
             )}
@@ -2044,12 +2167,10 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     <Action
                       variant="ghost"
                       icon="RotateCcw"
-                      disabled={queueLoading}
+                      disabled={queueLoading || !!limitedUntil}
                       onClick={refreshFromGitHub}
                     >
-                      {queueLoading
-                        ? "Refreshing GitHub…"
-                        : "Refresh from GitHub"}
+                      {refreshLabel(queueLoading)}
                     </Action>
                   </div>
                 </header>
@@ -2285,12 +2406,10 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       <Action
                         variant="ghost"
                         icon="RotateCcw"
-                        disabled={queueLoading}
+                        disabled={queueLoading || !!limitedUntil}
                         onClick={refreshFromGitHub}
                       >
-                        {queueLoading
-                          ? "Refreshing GitHub…"
-                          : "Refresh from GitHub"}
+                        {refreshLabel(queueLoading)}
                       </Action>
                     )}
                     {!detailRow.running &&

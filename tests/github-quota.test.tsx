@@ -190,19 +190,125 @@ test("a failed GitHub read stops polling and offers Retry", async () => {
     snapshot: () => base,
     refresh: () => base,
     prDetails: () => {
-      if (fail) throw Error("gh: API rate limit exceeded");
+      if (fail) throw Error("gh: Bad credentials (HTTP 401)");
       return prDetails(null);
     },
   });
-  expect(await slot.findByText(/API rate limit exceeded/)).toBeTruthy();
+  expect(await slot.findByText(/Bad credentials/)).toBeTruthy();
   await wait(3400);
   expect(calls("prDetails")).toHaveLength(1);
   // The error stays up instead of flipping back to "Loading…".
-  expect(slot.getByText(/API rate limit exceeded/)).toBeTruthy();
+  expect(slot.getByText(/Bad credentials/)).toBeTruthy();
 
   fail = false;
   fireEvent.click(slot.getByRole("button", { name: "Retry" }));
   await slot.findByRole("heading", { name: pr.title });
   expect(calls("prDetails")).toHaveLength(2);
-  expect(slot.queryByText(/API rate limit exceeded/)).toBeNull();
+  expect(slot.queryByText(/Bad credentials/)).toBeNull();
 }, 10_000);
+
+const inMinutes = (minutes: number) =>
+  new Date(Date.now() + minutes * 60_000).toISOString();
+const limits = (coreRemaining: number) => ({
+  core: { limit: 5000, remaining: coreRemaining, resetAt: inMinutes(9) },
+  search: { limit: 30, remaining: 30, resetAt: inMinutes(1) },
+  graphql: { limit: 5000, remaining: 4990, resetAt: inMinutes(40) },
+});
+async function openOverview(rpc: Handlers) {
+  vi.resetModules();
+  const app = await loadPluginApp(() => import("../app"));
+  slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc });
+}
+
+test("a rate-limited refresh says when GitHub resets and holds Refresh until then", async () => {
+  await openOverview({
+    snapshot: () => base,
+    refresh: () => {
+      throw Error(
+        "Error: gh exited 1: gh: API rate limit exceeded for user ID 165939280.",
+      );
+    },
+    rateLimit: () => limits(0),
+  });
+  fireEvent.click(await slot.findByRole("tab", { name: /^PR Queue/ }));
+  fireEvent.click(slot.getByRole("button", { name: "Refresh from GitHub" }));
+  const notice = await slot.findByRole("alert", {
+    name: undefined,
+  });
+  await waitFor(() =>
+    expect(notice.textContent).toMatch(/It resets at .*\(in (9|10) minutes\)/),
+  );
+  expect(notice.textContent).toMatch(/GitHub's API rate limit is used up/);
+  expect(notice.textContent).toMatch(
+    /The queue below is from your last refresh/,
+  );
+  // The raw gh output, including the account's user ID, is not shown.
+  expect(slot.queryByText(/165939280/)).toBeNull();
+  const refresh = slot.getByRole("button", { name: /^Refresh after / });
+  expect(refresh.hasAttribute("disabled")).toBe(true);
+  expect(calls("rateLimit")).toHaveLength(1);
+  expect(calls("refresh")).toHaveLength(1);
+});
+
+test("a short-term secondary limit asks to wait without blocking Refresh", async () => {
+  let fail = true;
+  await openOverview({
+    snapshot: () => base,
+    refresh: () => {
+      if (fail) throw Error("gh: You have exceeded a secondary rate limit.");
+      return base;
+    },
+    rateLimit: () => limits(4000),
+  });
+  fireEvent.click(await slot.findByRole("tab", { name: /^PR Queue/ }));
+  fireEvent.click(slot.getByRole("button", { name: "Refresh from GitHub" }));
+  expect(
+    await slot.findByText("GitHub asked Pair Review to slow down"),
+  ).toBeTruthy();
+  const refresh = slot.getByRole("button", { name: "Refresh from GitHub" });
+  await waitFor(() => expect(refresh.hasAttribute("disabled")).toBe(false));
+  fail = false;
+  fireEvent.click(refresh);
+  await waitFor(() =>
+    expect(
+      slot.queryByText("GitHub asked Pair Review to slow down"),
+    ).toBeNull(),
+  );
+});
+
+test("a rate-limited PR page explains the wait instead of a raw error", async () => {
+  await open({
+    snapshot: () => base,
+    refresh: () => base,
+    prDetails: () => {
+      throw Error("gh: API rate limit exceeded for user ID 165939280.");
+    },
+    rateLimit: () => limits(0),
+  });
+  expect(
+    await slot.findByText("GitHub's API rate limit is used up"),
+  ).toBeTruthy();
+  await waitFor(() =>
+    expect(
+      slot.getByText(/This page loads once it can reach GitHub again/)
+        .textContent,
+    ).toMatch(/It resets at/),
+  );
+  expect(slot.queryByText(/165939280/)).toBeNull();
+  expect(
+    slot.getByRole("button", { name: "Retry" }).hasAttribute("disabled"),
+  ).toBe(true);
+});
+
+test("Setup health shows the remaining GitHub budget when opened", async () => {
+  await openOverview({
+    snapshot: () => base,
+    refresh: () => base,
+    rateLimit: () => limits(4321),
+  });
+  fireEvent.click(await slot.findByRole("button", { name: /Setup health/ }));
+  expect(
+    await slot.findByText(/4,321 of 5,000 requests left · resets/),
+  ).toBeTruthy();
+  expect(slot.getByText(/30 of 30 searches left/)).toBeTruthy();
+});

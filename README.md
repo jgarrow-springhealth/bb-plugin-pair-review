@@ -82,7 +82,7 @@ Plugin settings choose the review and resolver providers and models. When presen
 
 ## Permissions, data, and external services
 
-- **GitHub:** discovery, PR metadata, diffs, and feedback use authenticated `gh` API reads. Plugin pages spend GitHub API quota only when you ask: opening Overview or leaving a PR page open makes no GitHub calls, and **Refresh from GitHub** is the explicit way to re-read. One full queue refresh makes roughly one API call per pull request plus a few searches, so refresh on demand rather than repeatedly. The signed-in login and each compare diff are remembered on disk (the diff by its exact commits, so it never goes stale) to avoid repeat calls. Normal review execution does not submit reviews, comments, resolve threads, edit PR metadata, or merge. Enabling publication does not bypass the separate final confirmation and ref/ownership checks.
+- **GitHub:** discovery, PR metadata, diffs, and feedback use authenticated `gh` API reads. Plugin pages spend GitHub API quota only when you ask: opening Overview or leaving a PR page open makes no GitHub calls, and **Refresh from GitHub** is the explicit way to re-read. The first queue refresh makes about one API call per pull request plus a few searches. Later refreshes look up only pull requests GitHub lists as updated since the last refresh, so a refresh with no changes costs a handful of calls; reviews still read the live pull request. The signed-in login and each compare diff are remembered on disk (the diff by its exact commits, so it never goes stale). If GitHub rate-limits Pair Review, the page says when the limit resets and holds **Refresh from GitHub** until then; **Setup health** shows the remaining budget, and reading it costs no quota. Normal review execution does not submit reviews, comments, resolve threads, edit PR metadata, or merge. Enabling publication does not bypass the separate final confirmation and ref/ownership checks.
 - **Local processes and files:** the trusted host worker runs the configured installed Pair Review command or local fork and uses Git in isolated retained directories. Evidence and checkouts live under `~/.pair-review/pi-batches`; Pair Review keeps its own configuration and database under `~/.pair-review`.
 - **Model provider:** native reviews use Pair Review's selected provider adapter. The resolver uses Pi's constrained SDK tools or a Claude/Codex agent rooted in a sanitized temporary source copy; only validated existing-file edits are applied to the retained checkout. Claude runs in restricted mode with only read/edit tools. Codex runs under its `workspace-write` sandbox, which blocks writes outside the copy and direct network access but may allow read-only host paths according to the installed Codex policy. Provider credentials remain in native stores, not BB plugin settings.
 - **Optional BB plugins:** PR Briefings and Projects & Sections add integrations when installed; Pair Review works without them.
@@ -122,10 +122,10 @@ BB does not watch a path install by default. What you need to do depends on what
 
 | You changed | To pick it up | Why |
 | --- | --- | --- |
-| `app.tsx`, `app.css`, `ui/`, `components/`, or a module the page imports at runtime (`queue.ts`, `time.ts`) | `bb plugin build . && bb plugin reload pair-review` | The page is compiled into `dist/app.js` and `dist/app.css`. |
+| `app.tsx`, `app.css`, `ui/`, `components/`, or a module the page imports at runtime (`queue.ts`, `time.ts`, `github-limits.ts`) | `bb plugin build . && bb plugin reload pair-review` | The page is compiled into `dist/app.js` and `dist/app.css`. |
 | `host.ts` | `bb plugin build . && bb plugin reload pair-review` | The host worker is bundled into `dist/host.js`. |
 | `server.ts`, `contract.ts`, or `sidebar-rows.ts` | `bb plugin reload pair-review` | Path installs load the server entry as TypeScript when the plugin loads, and the server validates RPC data with `contract.ts`. |
-| `service.ts`, `engine/`, `bridge.mjs` | Nothing; the next request uses it | Each request starts a fresh `node bridge.mjs` from your checkout. |
+| `service.ts`, `cache.ts`, `engine/`, `bridge.mjs` | Nothing; the next request uses it | Each request starts a fresh `node bridge.mjs` from your checkout. |
 
 When in doubt, build and reload. For active work, run the watch loop instead. It rebuilds and reloads on every save, and writes an unminified `dist/app.js` for readable stack traces:
 
@@ -161,6 +161,7 @@ Run `typecheck`, `test`, and `build` before every pull request. The compatibilit
 | `components/ui/` | BB registry primitives (button, dialog, select, tooltip, …). Update them from BB's registry rather than editing them by hand. |
 | `server.ts` | Plugin backend: RPC handlers, settings, realtime updates, CLI command. |
 | `contract.ts` | Shared RPC and data contracts used by the page, server, and host. |
+| `cache.ts`, `github-limits.ts` | On-disk caches that spare GitHub's rate limit (login, diffs, unchanged pull requests) and rate-limit detection. |
 | `host.ts`, `bridge.mjs`, `service.ts` | Full-trust host worker and the bridge that runs each request through `service.ts`. |
 | `engine/` | Pair Review execution, Git checkouts, the resolver loop, and guards. |
 | `tests/` | Offline unit and UI tests (Vitest + Testing Library). |
