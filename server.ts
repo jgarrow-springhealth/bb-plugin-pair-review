@@ -318,6 +318,7 @@ export default function plugin(bb: BbPluginApi) {
     },
     openFork: async (input) => (await invoke("openFork", input)).result as any,
     rateLimit: async () => (await invoke("rateLimit")).result as any,
+    prStatus: async (input) => (await invoke("prStatus", input)).result as any,
   });
   bb.onDispose(() => syncProjectRows(null));
   bb.cli.register({

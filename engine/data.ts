@@ -174,6 +174,19 @@ export class GitHub {
   async login() {
     return Coordinate.parse((await this.api("user")).login);
   }
+  /** A pull request's current head and whether it is still open. One API call. */
+  async pullState(url: string) {
+    const c = parseURL(url, this.host);
+    const raw = await this.api(`repos/${c.owner}/${c.repo}/pulls/${c.number}`);
+    return {
+      head: Sha.parse(raw?.head?.sha),
+      state: raw?.merged_at
+        ? ("merged" as const)
+        : raw?.state === "closed"
+          ? ("closed" as const)
+          : ("open" as const),
+    };
+  }
   /** Remaining API budgets. GitHub does not count this call against them. */
   async rateLimit() {
     return JSON.parse(

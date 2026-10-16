@@ -998,6 +998,11 @@ export async function invoke(request: Request) {
       return snapshot();
     case "rateLimit":
       return parseRateLimit(await github.rateLimit());
+    case "prStatus": {
+      // One live read so a review page can tell whether its findings are stale.
+      const q = rpcContract.prStatus.input.parse(payload);
+      return { ...(await github.pullState(q.url)), checkedAt: now() };
+    }
     case "refresh": {
       // Discovery only; authorization checks elsewhere still ask GitHub.
       const login = await cachedLogin(github, cacheDir, p.hostname);

@@ -59,7 +59,8 @@ import {
   type Tone,
 } from "./ui/kit";
 import { FindingsReport, isPraise } from "./ui/findings";
-import { IconAction, Picker, TooltipProvider } from "./ui/controls";
+import { Hint, IconAction, Picker, TooltipProvider } from "./ui/controls";
+import { newestHead, reviewFreshness, type HeadSource } from "./freshness";
 import {
   describeReset,
   isRateLimitError,
@@ -651,6 +652,13 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     [resolverDialogOpen, setResolverDialogOpen] = useState(false),
     [localOpen, setLocalOpen] = useState(false);
   const reloadDetailsRef = useRef<(() => void) | null>(null);
+  // GitHub's head for the PR on this page, read live when the page opens.
+  const [livePr, setLivePr] = useState<{
+    head: string;
+    state: "open" | "closed" | "merged" | null;
+    checkedAt: string;
+  } | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
   // Set when GitHub rate-limits a request; cleared once a request succeeds.
   const [githubLimit, setGithubLimit] = useState<{
     resetAt: string | null;
@@ -697,12 +705,15 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     setPrFeedback(null);
     setPrCanResolve(false);
     setPrBriefing(null);
+    setLivePr(null);
+    setLiveError(null);
     if (!detailOpen) return;
     let loading = false;
     // A PR page asks GitHub once when it opens, and again only on request or
     // when this PR's local review changes. The 3-second poll below reads local
     // state only, so an open tab never spends API quota.
     let fetchPr = true,
+      fetchLive = true,
       prFailed = false,
       prTarget: { batchId: string; index: number } | null = null;
     const watchesPr = !!prUrl && !activeStartedSelection;
@@ -726,6 +737,12 @@ function PairReviewPage({ subPath }: { subPath: string }) {
             }
             if (!live) return;
             setPrInfo(result.pr);
+            setLivePr({
+              head: result.pr.head,
+              state: null,
+              checkedAt: new Date().toISOString(),
+            });
+            setLiveError(null);
             availablePrPatches = result.patches;
             setPrPatches(availablePrPatches);
             setPrPatchError(result.patchError);
@@ -738,6 +755,22 @@ function PairReviewPage({ subPath }: { subPath: string }) {
           target = prTarget;
         }
         const value = target ? await rpc.call("details", target) : null;
+        if (live && !watchesPr && fetchLive && value?.row.url) {
+          fetchLive = false;
+          const url = value.row.url;
+          rpc
+            .call("prStatus", { url })
+            .then((status) => {
+              if (!live) return;
+              setLivePr(status);
+              setLiveError(null);
+            })
+            .catch((error) => {
+              if (!live) return;
+              setLiveError(String(error));
+              void noteRateLimit(error);
+            });
+        }
         if (live) {
           setDetails(value);
           const availablePatches = value?.patches ?? availablePrPatches;
@@ -764,6 +797,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     };
     reloadDetailsRef.current = () => {
       fetchPr = true;
+      fetchLive = true;
       void load();
     };
     void load();
@@ -1326,6 +1360,50 @@ function PairReviewPage({ subPath }: { subPath: string }) {
   const queueEntry = detailRow
     ? (data?.queue ?? []).find((q) => q.key === detailRow.key)
     : undefined;
+  // Are these findings about the PR's current code? Use the most recently
+  // checked head: this page's live read, or the saved queue.
+  const headSource: HeadSource | null = newestHead(
+    livePr ? { ...livePr, source: "live" } : null,
+    queueEntry
+      ? {
+          head: queueEntry.head,
+          checkedAt: data?.queueRefreshedAt ?? null,
+          state: null,
+          source: "queue",
+        }
+      : null,
+  );
+  const freshness = detailRow
+    ? reviewFreshness({
+        reviewedHead: detailRow.head,
+        source: headSource,
+        local: !detailRow.url,
+        checkError: liveError,
+      })
+    : null;
+  const detailStale = !!freshness?.stale;
+  // A pill, with the detail on hover: stale findings, or freshness that
+  // could not be confirmed. Nothing when the head is confirmed current.
+  const freshnessHint = !freshness
+    ? null
+    : freshness.stale
+      ? `Reviewed ${short(detailRow!.head)} · GitHub head is now ${short(freshness.head!)}${freshness.checked ? ` · checked ${freshness.checked}` : ""}`
+      : freshness.status === "unverified" || freshness.status === "unknown"
+        ? `${freshness.note}`
+        : null;
+  const freshnessPill = freshnessHint ? (
+    <Hint label={freshnessHint}>
+      <span
+        tabIndex={0}
+        aria-label={`${detailStale ? "Outdated" : "Not confirmed"}: ${freshnessHint}`}
+        className="inline-flex rounded-full outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <Badge tone={detailStale ? "finding" : "neutral"}>
+          {detailStale ? "Outdated" : "Not confirmed"}
+        </Badge>
+      </span>
+    </Hint>
+  ) : null;
   const praiseCount = details?.findings.filter(isPraise).length ?? 0;
   const actionableCount = (details?.findings.length ?? 0) - praiseCount;
   const activeDetailTab: DetailTab =
@@ -1352,7 +1430,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
             ? "warn"
             : "good"
           : "neutral";
-  const progress = (r: ReviewRow) => {
+  const progress = (r: ReviewRow, stale: boolean) => {
     const done = completedReview(r);
     const triaged = done && (r.finalReview || r.count === 0);
     const failed = !!r.attention && !r.running;
@@ -1391,7 +1469,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
           : "Submit on GitHub yourself",
         status: (r.submitted
           ? "done"
-          : triaged && !isOutdated(r)
+          : triaged && !stale
             ? "current"
             : "todo") as StepStatus,
       },
@@ -2306,9 +2384,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     ) : completedReview(detailRow) ? (
                       <span className="pr-statuses">
                         <FindingCount count={detailRow.count} />
-                        {isOutdated(detailRow) && (
-                          <Badge tone="finding">Outdated</Badge>
-                        )}
+                        {freshnessPill}
                       </span>
                     ) : (
                       <Badge>{label(detailRow.reviewState)}</Badge>
@@ -2484,30 +2560,15 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     />
                     <Metric
                       label="Freshness"
-                      value={
-                        !queueEntry
-                          ? "Not in queue"
-                          : isOutdated(detailRow)
-                            ? "New commits"
-                            : "Current"
-                      }
-                      note={
-                        !queueEntry
-                          ? "Closed, merged or local"
-                          : isOutdated(detailRow)
-                            ? `GitHub head is now ${short(queueEntry.head)}`
-                            : "Head unchanged since review"
-                      }
-                      tone={
-                        !queueEntry
-                          ? "neutral"
-                          : isOutdated(detailRow)
-                            ? "warn"
-                            : "good"
-                      }
+                      value={freshness?.value ?? "Unknown"}
+                      note={freshness?.note}
+                      tone={freshness?.tone ?? "neutral"}
                     />
                   </MetricRow>
-                  <Steps label="Review progress" items={progress(detailRow)} />
+                  <Steps
+                    label="Review progress"
+                    items={progress(detailRow, detailStale)}
+                  />
                 </section>
                 {detailRow.attention && (
                   <section
@@ -2665,12 +2726,6 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                   >
                     <h2 id="pr-summary-title">Review summary</h2>
                     <p>{details.summary}</p>
-                    {isOutdated(detailRow) && (
-                      <p className="text-destructive">
-                        This review describes an earlier PR head. Review latest
-                        changes before using these findings.
-                      </p>
-                    )}
                   </section>
                 )}
                 <section className="pr-frame" aria-label="Review details">
@@ -2708,6 +2763,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                           key={detailRow.id}
                           findings={details.findings}
                           hostId={data.hostId}
+                          status={freshnessPill}
                         />
                       ) : (
                         <Empty>No findings for this run.</Empty>

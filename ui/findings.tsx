@@ -6,7 +6,7 @@
 // Modifications: reads Pair Review findings (kind, severity, suggestion,
 // disposition, retained source path) instead of tool reports; adds the
 // Actionable/Praise filter; links into the retained checkout through BB.
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   Markdown,
   experimental_FileLink as FileLink,
@@ -438,9 +438,12 @@ const TEXT_BUTTON = cn(
 export function FindingsReport({
   findings,
   hostId,
+  status,
 }: {
   findings: readonly Finding[];
   hostId: string;
+  /** Shown beside the heading, e.g. an Outdated pill. */
+  status?: ReactNode;
 }) {
   const praiseCount = findings.filter(isPraise).length;
   const actionableCount = findings.length - praiseCount;
@@ -471,9 +474,12 @@ export function FindingsReport({
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex min-w-0 flex-col">
-        <h2 className="m-0 text-[15px] font-semibold leading-6 tracking-[-0.01em] text-foreground">
-          Findings
-        </h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="m-0 text-[15px] font-semibold leading-6 tracking-[-0.01em] text-foreground">
+            Findings
+          </h2>
+          {status}
+        </div>
         <span className="text-xs leading-5 text-muted-foreground">
           Review observations from the exact captured changes ·{" "}
           {findings.length} {findings.length === 1 ? "finding" : "findings"} ·{" "}

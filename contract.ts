@@ -469,6 +469,14 @@ export const rpcContract = defineRpcContract({
     output: detailsSchema.shape.briefing,
   },
   settings: { input: Preferences, output: Preferences },
+  prStatus: {
+    input: z.object({ url: z.string().url().max(2048) }).strict(),
+    output: z.object({
+      head: sha,
+      state: z.enum(["open", "closed", "merged"]),
+      checkedAt: z.string(),
+    }),
+  },
   rateLimit: {
     input: z.null(),
     output: z.object({
@@ -503,6 +511,7 @@ export const hostContract = defineRpcContract({
           "action",
           "openFork",
           "rateLimit",
+          "prStatus",
         ]),
         payload: z.unknown().optional(),
       })
