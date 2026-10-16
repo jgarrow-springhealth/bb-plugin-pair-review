@@ -176,7 +176,7 @@ Run `typecheck`, `test`, and `build` before every pull request. The compatibilit
 - **Use `Picker` instead of a native `<select>`.** In tests, drive it with `choose()` and read it with `shown()` from `tests/picker.ts`.
 - **Overview tests pick a tab first.** The overview remembers its tab between visits, so each test selects the tab it needs instead of relying on the default.
 - **Credit adapted code.** If you adapt third-party code, keep its license header, add it to [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and include its license under `licenses/`.
-- **Screenshots must be sanitized.** Only release screenshots with no private repositories, counts, or credentials belong under `docs/screenshots/`.
+- **Screenshots must be sanitized.** Only release screenshots rendered from fictional data, with no private repositories, handles, counts, or credentials, belong under `docs/screenshots/`. Capture the real UI with its RPC responses replaced by fixtures, and keep BB's sidebar out of frame because it lists your thread titles.
 
 ### Pull request checklist
 
@@ -188,27 +188,30 @@ Run `typecheck`, `test`, and `build` before every pull request. The compatibilit
 
 ## Screenshots
 
-A synthetic retained review rendered through the real production UI shows the
-primary outcome: evidence attached to each finding, with severity, location,
-commentary, and a concrete suggestion. No model or GitHub write was used for
-this capture:
+These show the real production UI rendered with fictional data (a made-up
+`acme` organization). No private repository, handle, or model output appears,
+and no model or GitHub write was used for any capture.
 
-![Pair Review retained findings](docs/screenshots/review-findings.png)
-
-The queue overview shows how reviews start and how pull requests can be filtered
-or selected in batches. Live repository, count, and queue data are omitted:
+The overview puts the start bar, the status summary with its request
+breakdown, and the tabbed PR queue on one screen. Filter by request type or
+repository, or select several pull requests to review as a batch:
 
 ![Pair Review queue overview](docs/screenshots/queue-overview.png)
 
-Public pull-request details show the changed-file selector, committed patch,
-resolver boundary, and human-feedback surface without starting an analysis:
+A retained review groups its findings by file and orders them by severity.
+Each expanded finding becomes its own card with its severity, location,
+comment, and a concrete suggestion:
+
+![Pair Review retained findings](docs/screenshots/review-findings.png)
+
+Details for a pull request that has not been reviewed show the committed patch
+behind a changed-file selector, human feedback, and the resolver-loop boundary,
+without starting an analysis:
 
 ![Pair Review pull-request details](docs/screenshots/pr-details.png)
 
 The native BB settings page exposes Pair Review's validated configuration.
-Configured installation, team, and teammate values are irreversibly redacted;
-credentials remain in their native stores. The capture excludes the unrelated
-installed-plugin list.
+Credentials remain in their native stores; none appear here.
 
 ![Pair Review settings in BB](docs/screenshots/settings.png)
 
