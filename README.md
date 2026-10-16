@@ -1,6 +1,6 @@
 # Pair Review for BB
 
-Pair Review brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed Pair Review app or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
+Pair Review brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed [Pair Review app](https://github.com/in-the-loop-labs/pair-review) or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
 
 ## What you can do
 
@@ -23,7 +23,7 @@ Opening **Details** never starts analysis or resolution. Reviews remain local. P
   gh auth status --hostname github.com
   ```
 
-- `@in-the-loop-labs/pair-review`, either installed so its `pair-review` command is on the BB server's `PATH`, or available as a local fork directory. Released versions 5.2.3 and 5.3.4 are accepted only at their verified adapter fingerprints. Other builds must expose the compatible machine-readable adapter contract; unknown or incompatible builds fail closed.
+- [`@in-the-loop-labs/pair-review`](https://github.com/in-the-loop-labs/pair-review), either installed so its `pair-review` command is on the BB server's `PATH`, or available as a local fork directory. Released versions 5.2.3 and 5.3.4 are accepted only at their verified adapter fingerprints. Other builds must expose the compatible machine-readable adapter contract; unknown or incompatible builds fail closed.
 - The CLI and authentication required by your selected provider. Native reviews use Pair Review's own provider adapters and configuration. Claude and Codex resolver modes call `claude` or `codex` from the BB server's `PATH`; Pi resolver mode uses Pi's provider configuration.
 
 Pi is not required for reviews or resolution when Claude Code or Codex is selected. Existing CLI subscription logins are used from their native credential stores. For safety, the guarded Claude/Codex resolver does not forward ambient provider API-key environment variables into the agent process; authenticate the CLI itself before starting a resolver loop. Queue browsing and committed-patch inspection use GitHub CLI reads and never invoke a model.
