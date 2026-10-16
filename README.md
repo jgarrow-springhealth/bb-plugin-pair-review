@@ -1,6 +1,6 @@
 # Pair Review for BB
 
-[Pair Review](https://github.com/in-the-loop-labs/pair-review) brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed Pair Review app or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
+Pair Review brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed [Pair Review app](https://github.com/in-the-loop-labs/pair-review) or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
 
 ## What you can do
 
