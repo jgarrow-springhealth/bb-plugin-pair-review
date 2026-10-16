@@ -68,7 +68,7 @@ import {
   owned,
   unchanged,
 } from "./engine/data.ts";
-import { run, launch, cancel, cleanEnv } from "./engine/process.ts";
+import { run, launch, cancelEntry, cleanEnv } from "./engine/process.ts";
 import {
   Envelope,
   verifySaved,
@@ -89,6 +89,18 @@ export const clean = (s: unknown) =>
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
 const shortIdentity = (value: unknown) =>
   typeof value === "string" && value ? value.slice(0, 12) : "missing";
+export function readyForFinalReview(
+  reviewState: string,
+  count: number,
+  dispositions?: { total: number; unresolved: number },
+) {
+  return (
+    reviewState === "zero_findings" ||
+    (reviewState === "findings" &&
+      dispositions?.total === count &&
+      dispositions.unresolved === 0)
+  );
+}
 type PairReviewExpectedIdentity = {
   version: string | null;
   dbId: string;
@@ -713,6 +725,38 @@ export async function invoke(request: Request) {
       db.close();
     }
   };
+  let findingDispositionCache:
+    | Map<string, { total: number; unresolved: number }>
+    | null = null;
+  const findingDispositions = () => {
+    if (findingDispositionCache) return findingDispositionCache;
+    const db = new DatabaseSync(runtime.database, { readOnly: true });
+    try {
+      findingDispositionCache = new Map(
+        (
+          db
+            .prepare(
+              `SELECT ai_run_id,
+                      COUNT(*) AS total,
+                      SUM(CASE WHEN status IN ('adopted', 'dismissed') THEN 0 ELSE 1 END) AS unresolved
+               FROM comments
+               WHERE source = 'ai'
+                 AND ai_run_id IS NOT NULL
+                 AND ai_level IS NULL
+                 AND COALESCE(is_raw, 0) = 0
+               GROUP BY ai_run_id`,
+            )
+            .all() as any[]
+        ).map((row) => [
+          String(row.ai_run_id),
+          { total: Number(row.total), unresolved: Number(row.unresolved) },
+        ]),
+      );
+      return findingDispositionCache;
+    } finally {
+      db.close();
+    }
+  };
   const nativeSuggestions = (runId: string | undefined) => {
     const byId = new Map<number, string>();
     if (!runId) return byId;
@@ -839,7 +883,11 @@ export async function invoke(request: Request) {
       running:
         !dismissed &&
         !superseded &&
-        (s.state === "running" || s.state === "queued"),
+        [e.review.state, e.resolver.state].some((state) =>
+          ["queued", "preparing", "reviewing", "resolving", "publishing"].includes(
+            state,
+          ),
+        ),
       canRetry: false,
       canAttempt: same && !superseded && !!e.attention,
       canResolve:
@@ -866,6 +914,13 @@ export async function invoke(request: Request) {
       submitted:
         typeof e.review.runId === "string" &&
         submittedRuns().has(e.review.runId),
+      finalReview: readyForFinalReview(
+        e.review.state,
+        e.review.count ?? 0,
+        typeof e.review.runId === "string"
+          ? findingDispositions().get(e.review.runId)
+          : undefined,
+      ),
     };
   };
   const snapshot = async (): Promise<Snapshot> => {
@@ -893,6 +948,7 @@ export async function invoke(request: Request) {
       }
     }
     let queue: QueueItem[] = [];
+    let queueRefreshedAt: string | null = null;
     try {
       const cache = json(join(root, "bb-queue.json"));
       if (
@@ -900,7 +956,8 @@ export async function invoke(request: Request) {
         JSON.stringify(cache.teams ?? []) === JSON.stringify(effectiveTeams) &&
         JSON.stringify(cache.teammates ?? []) ===
           JSON.stringify(effectiveTeammates)
-      )
+      ) {
+        queueRefreshedAt = typeof cache.at === "string" ? cache.at : null;
         queue = cache.items.map((item: any) => ({
           ...item,
           branch: typeof item.branch === "string" ? item.branch : "",
@@ -912,8 +969,16 @@ export async function invoke(request: Request) {
               ? item.changes
               : null,
         }));
+      }
     } catch {}
-    return { rows, queue, warnings: notes, updatedAt: now(), health: f };
+    return {
+      rows,
+      queue,
+      warnings: notes,
+      updatedAt: now(),
+      queueRefreshedAt,
+      health: f,
+    };
   };
   const payload = request.payload ?? {};
   switch (request.operation) {
@@ -1372,6 +1437,7 @@ export async function invoke(request: Request) {
           stale: false,
           error: null,
           updatedAt: null,
+          threadId: null,
         },
         activity,
         feedback,
@@ -1510,7 +1576,22 @@ export async function invoke(request: Request) {
         return { accepted: true };
       }
       if (q.action === "cancel") {
-        await cancel(v.dir);
+        const latest = readStatus(v.dir);
+        const entry = latest.entries[q.index];
+        if (!entry || isSuperseded(entry, latest))
+          throw Error("Review is no longer active");
+        if (
+          ![
+            entry.review.state,
+            entry.resolver.state,
+          ].some((state) =>
+            ["queued", "preparing", "reviewing", "resolving", "publishing"].includes(
+              state,
+            ),
+          )
+        )
+          throw Error("This PR run is not active");
+        cancelEntry(v.dir, q.index);
         return { accepted: true };
       }
       if (q.action === "recover") {

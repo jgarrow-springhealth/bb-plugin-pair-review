@@ -36,9 +36,69 @@ import type {
 } from "./contract";
 import "./app.css";
 import { queueFilters, repositoryFor } from "./queue";
-import { relativeUpdatedAt } from "./time";
+import { relativeRefreshedAt, relativeUpdatedAt } from "./time";
+import { cn } from "@/lib/utils";
+import {
+  Callout,
+  Chevron,
+  Disclosure,
+  DotLabel,
+  KeyValue,
+  Metric,
+  MetricRow,
+  Pill,
+  SegmentedBar,
+  Steps,
+  Tabs,
+  Timeline,
+  TONE_TEXT,
+  rampColor,
+  type BarPart,
+  type StepStatus,
+  type TabSpec,
+  type Tone,
+} from "./ui/kit";
+import { FindingsReport, isPraise } from "./ui/findings";
+import { IconAction, Picker, TooltipProvider } from "./ui/controls";
 type PageData = Snapshot & { hostId: string; preferences: Preferences };
+type OverviewTab =
+  | "queue"
+  | "running"
+  | "attention"
+  | "final"
+  | "recent"
+  | "dismissed";
+type DetailTab =
+  | "findings"
+  | "changes"
+  | "feedback"
+  | "activity"
+  | "history"
+  | "resolver";
+/** The overview tab survives a trip to Details and back. */
+let lastOverviewTab: OverviewTab = "queue";
+/** Queue composition, most team-relevant first; a PR counts under its first match. */
+const REQUEST_ORDER = [
+  "Team request",
+  "Teammate request",
+  "Assigned",
+  "Authored",
+  "Other direct request",
+] as const;
+const REQUEST_LABELS: Record<(typeof REQUEST_ORDER)[number], string> = {
+  "Team request": "Team requests",
+  "Teammate request": "Teammate requests",
+  Assigned: "Assigned",
+  Authored: "Authored",
+  "Other direct request": "Other direct requests",
+};
 const label = (s: string) => s.replaceAll("_", " ");
+const resolverCardLabel = (state: string) =>
+  state === "resolving"
+    ? "Resolver: running"
+    : state === "reviewing"
+      ? "Resolver: reviewing"
+      : null;
 const short = (s: string) => s.slice(0, 10);
 const when = (s: string) =>
   Number.isFinite(Date.parse(s))
@@ -115,6 +175,16 @@ function useData() {
     report: (e: unknown) => setError(String(e)),
   };
 }
+const BADGE_TONE: Record<
+  "neutral" | "danger" | "good" | "running" | "finding",
+  Tone
+> = {
+  neutral: "neutral",
+  danger: "bad",
+  good: "good",
+  running: "info",
+  finding: "warn",
+};
 function Badge({
   children,
   tone = "neutral",
@@ -122,7 +192,11 @@ function Badge({
   children: ReactNode;
   tone?: "neutral" | "danger" | "good" | "running" | "finding";
 }) {
-  return <span className={`pr-badge pr-badge-${tone}`}>{children}</span>;
+  return (
+    <Pill tone={BADGE_TONE[tone]} className={`pr-badge pr-badge-${tone}`}>
+      {children}
+    </Pill>
+  );
 }
 function completedReview(row: ReviewRow) {
   return (
@@ -160,20 +234,62 @@ function RunningIndicator() {
     </span>
   );
 }
+const changeLabel = (changes: NonNullable<QueueItem["changes"]>) =>
+  `${changes.files} changed ${changes.files === 1 ? "file" : "files"}, ${changes.additions} additions, ${changes.deletions} deletions`;
 function ChangeSummary({ changes }: { changes: QueueItem["changes"] }) {
   if (!changes) return null;
   return (
-    <div
-      className="pr-change-stats"
-      aria-label={`${changes.files} changed ${changes.files === 1 ? "file" : "files"}, ${changes.additions} additions, ${changes.deletions} deletions`}
-    >
-      <span>
-        <strong>{changes.files}</strong>{" "}
-        {changes.files === 1 ? "file" : "files"} changed
+    <div className="pr-change-stats" aria-label={changeLabel(changes)}>
+      <span className={cn("pr-additions", !changes.additions && "pr-zero")}>
+        +{changes.additions}
       </span>
-      <span className="pr-additions">+{changes.additions}</span>
-      <span className="pr-deletions">−{changes.deletions}</span>
+      <span className={cn("pr-deletions", !changes.deletions && "pr-zero")}>
+        −{changes.deletions}
+      </span>
+      <span className="pr-change-files">
+        {changes.files} {changes.files === 1 ? "file" : "files"}
+      </span>
     </div>
+  );
+}
+function ChangeMetric({
+  changes,
+  active,
+  onClick,
+}: {
+  changes: QueueItem["changes"];
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <Metric
+      label="Change size"
+      value={
+        changes ? (
+          <span aria-label={changeLabel(changes)}>
+            <span
+              className={cn("pr-additions", !changes.additions && "pr-zero")}
+            >
+              +{changes.additions}
+            </span>{" "}
+            <span
+              className={cn("pr-deletions", !changes.deletions && "pr-zero")}
+            >
+              −{changes.deletions}
+            </span>
+          </span>
+        ) : (
+          "—"
+        )
+      }
+      note={
+        changes
+          ? `${changes.files} ${changes.files === 1 ? "file" : "files"}`
+          : "Size unknown"
+      }
+      active={active}
+      onClick={onClick}
+    />
   );
 }
 function CodeChanges({
@@ -188,28 +304,25 @@ function CodeChanges({
   error?: string | null;
 }) {
   return (
-    <section className="pr-card border border-border bg-card">
-      <h2>Code changes</h2>
-      <p className="text-muted-foreground">
+    <section className="pr-panel" aria-labelledby="pr-code-changes-title">
+      <h2 id="pr-code-changes-title">Code changes</h2>
+      <p className="pr-panel-caption">
         Select one changed file to inspect its committed patch. Analysis is not
         required to view these changes.
       </p>
       <div className="pr-diff-picker">
-        <select
-          aria-label="Changed file"
+        <Picker
+          label="Changed file"
           value={selectedFile}
-          disabled={!patches.length}
-          onChange={(event) => onSelectedFile(event.target.value)}
-        >
-          {!patches.length && (
-            <option value="">No changed files available</option>
-          )}
-          {patches.map((file, index) => (
-            <option value={String(index)} key={`${file.path}-${index}`}>
-              {file.path}
-            </option>
-          ))}
-        </select>
+          onChange={onSelectedFile}
+          placeholder="No changed files available"
+          mono
+          className="w-full"
+          options={patches.map((file, index) => ({
+            value: String(index),
+            label: file.path,
+          }))}
+        />
       </div>
       {error && <p className="text-destructive">{error}</p>}
       {selectedFile !== "" && patches[Number(selectedFile)] && (
@@ -230,24 +343,26 @@ function BriefingCard({
   briefing,
   busy,
   onOpen,
+  onOpenThread,
   onGenerate,
 }: {
   briefing: Details["briefing"];
   busy: boolean;
   onOpen: () => void;
+  onOpenThread: () => void;
   onGenerate: () => void;
 }) {
   if (!briefing.available) return null;
   const generating = ["queued", "generating"].includes(briefing.state);
   return (
-    <section className="pr-card border border-border bg-card">
-      <div className="pr-heading">
+    <section className="pr-frame" aria-label="PR briefing">
+      <div className="pr-panel-heading">
         <h2>PR briefing</h2>
         <Badge tone={briefing.state === "failed" ? "danger" : "neutral"}>
           {label(briefing.state)}
         </Badge>
       </div>
-      <p className="text-muted-foreground">
+      <p className="pr-panel-caption">
         A self-contained visual explanation of behavior changes, affected
         surfaces, important flows, and boundaries. Generated independently by
         the PR Briefings plugin.
@@ -260,6 +375,21 @@ function BriefingCard({
         >
           Open briefing
         </Action>
+        <span
+          title={
+            briefing.threadId
+              ? "Open the retained BB thread for this briefing"
+              : "No retained briefing thread is available"
+          }
+        >
+          <Action
+            variant="outline"
+            disabled={!briefing.threadId}
+            onClick={onOpenThread}
+          >
+            Open briefing thread
+          </Action>
+        </span>
         <Action
           variant="outline"
           disabled={busy || generating}
@@ -285,7 +415,7 @@ function BriefingCard({
 function CardIssue({ reviewFailed = false }: { reviewFailed?: boolean }) {
   return (
     <div className="pr-card-issue" role="note">
-      <Icon name="TriangleAlert" className="size-4" />
+      <Icon name="AlertTriangle" className="size-3.5" />
       <div>
         <strong>
           {reviewFailed ? "Review couldn’t finish" : "Action required"}
@@ -302,7 +432,7 @@ function CardIssue({ reviewFailed = false }: { reviewFailed?: boolean }) {
 function ResolverIssue() {
   return (
     <div className="pr-card-issue" role="note">
-      <Icon name="TriangleAlert" className="size-4" />
+      <Icon name="AlertTriangle" className="size-3.5" />
       <div>
         <strong>Review completed</strong>
         <span>
@@ -487,16 +617,18 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     [repoFilter, setRepoFilter] = useState("All"),
     [search, setSearch] = useState(""),
     [selected, setSelected] = useState(new Set<string>()),
-    [collapsed, setCollapsed] = useState(new Set<string>(["dismissed"])),
+    [tab, setTabState] = useState<OverviewTab>(lastOverviewTab),
+    [detailTab, setDetailTab] = useState<DetailTab | null>(null),
+    [healthOpen, setHealthOpen] = useState(false),
     [selectedFile, setSelectedFile] = useState(""),
-    [showFeedback, setShowFeedback] = useState(false),
-    [resolverDialogOpen, setResolverDialogOpen] = useState(false);
+    [resolverDialogOpen, setResolverDialogOpen] = useState(false),
+    [localOpen, setLocalOpen] = useState(false);
   useEffect(() => {
     let live = true;
     setDetails(null);
     setDetailsError("");
     setSelectedFile("");
-    setShowFeedback(false);
+    setDetailTab(null);
     setResolvedSelection(null);
     setPrInfo(null);
     setPrPatches([]);
@@ -593,9 +725,17 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     if (!hostname) return;
     void refreshQueue();
   }, [hostname, refreshQueue]);
+  const previousHostname = useRef<string | undefined>(undefined);
   useEffect(() => {
-    setRepoFilter("All");
-    setSelected(new Set());
+    if (
+      previousHostname.current &&
+      hostname &&
+      previousHostname.current !== hostname
+    ) {
+      setRepoFilter("All");
+      setSelected(new Set());
+    }
+    previousHostname.current = hostname;
   }, [hostname]);
   const open = (row: ReviewRow) =>
     navigate.toPluginPanel("reviews", {
@@ -637,7 +777,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     let confirmed = false;
     if (kind === "cancel") {
       confirmed = window.confirm(
-        "Cancel this entire batch? Retained checkouts and completed results will be preserved.",
+        "Stop this PR's run? Other reviews in the same batch will continue, and retained checkouts or completed results will be preserved.",
       );
       if (!confirmed) return false;
     }
@@ -686,14 +826,6 @@ function PairReviewPage({ subPath }: { subPath: string }) {
   const allRows = data?.rows ?? [],
     dismissedRows = allRows.filter((r) => r.dismissed),
     rows = allRows.filter((r) => !r.dismissed);
-  const running = rows.filter((r) => r.running && !r.superseded),
-    attention = rows.filter(
-      (r) => !r.running && !r.superseded && !!r.attention,
-    ),
-    recentRows = rows.filter(
-      (r) => !r.running && !attention.includes(r) && !r.submitted,
-    );
-  const runningKeys = new Set(running.map((r) => r.key));
   const latestRowsByKey = new Map<string, ReviewRow>();
   for (const row of rows)
     if (!row.superseded && !latestRowsByKey.has(row.key))
@@ -705,6 +837,32 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     const current = currentQueueByKey.get(row.key);
     return !!current && current.head !== row.head;
   };
+  const running = rows.filter((r) => r.running && !r.superseded),
+    attention = rows.filter(
+      (r) => !r.running && !r.superseded && !!r.attention,
+    ),
+    finalReviewRows = rows.filter(
+      (r) =>
+        !r.running &&
+        !r.superseded &&
+        !r.attention &&
+        !r.submitted &&
+        r.finalReview &&
+        !isOutdated(r),
+    ),
+    recentRows = rows.filter(
+      (r) =>
+        !r.running &&
+        !attention.includes(r) &&
+        !finalReviewRows.includes(r) &&
+        !r.submitted,
+    );
+  const runningKeys = new Set(running.map((r) => r.key));
+  const movedQueueKeys = new Set(
+    [...running, ...attention, ...recentRows, ...finalReviewRows].map(
+      (row) => row.key,
+    ),
+  );
   const issueFor = (key: string) => {
     const row = latestRowsByKey.get(key);
     return row?.attention && !row.running ? row : null;
@@ -715,6 +873,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
   };
   const queue = (data?.queue ?? []).filter(
     (q) =>
+      !movedQueueKeys.has(q.key) &&
       !(
         data?.preferences.hideReviewed &&
         q.freshness === "current" &&
@@ -734,890 +893,1096 @@ function PairReviewPage({ subPath }: { subPath: string }) {
         .toLowerCase()
         .includes(search.toLowerCase()),
   );
-  const toggle = (key: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
-      return next;
-    });
-  const section = (
-    key: string,
-    title: string,
-    count: number,
-    description: string,
-    children: ReactNode,
-  ) => (
-    <section id={`pr-${key}`} className="pr-section">
-      <button
-        className="pr-section-heading"
-        aria-expanded={!collapsed.has(key)}
-        onClick={() => toggle(key)}
-      >
-        <Icon
-          name={collapsed.has(key) ? "ChevronRight" : "ChevronDown"}
-          className="size-4"
-        />
-        <div>
-          <h2>{title}</h2>
-          <p className="text-sm text-muted-foreground">{description}</p>
-        </div>
-        <Badge>{count}</Badge>
-      </button>
-      {!collapsed.has(key) && children}
-    </section>
-  );
-  const card = (r: ReviewRow) => (
-    <article className="pr-review-card border border-border bg-card" key={r.id}>
-      <div className="pr-heading">
-        <h3 title={r.title}>{r.title}</h3>
-        {r.running && !r.superseded ? (
-          <RunningIndicator />
-        ) : r.dismissed ? (
-          <Badge>Dismissed</Badge>
-        ) : r.superseded ? (
-          <Badge>Historical attempt</Badge>
-        ) : r.attention ? (
-          <Badge tone="danger">
-            {r.reviewState === "needs_attention"
-              ? "Review failed"
-              : "Needs attention"}
-          </Badge>
-        ) : completedReview(r) ? (
-          <span className="pr-statuses">
-            <FindingCount count={r.count} />
-            {isOutdated(r) && <Badge tone="finding">Outdated</Badge>}
-          </span>
-        ) : (
-          <Badge>{label(r.reviewState)}</Badge>
-        )}
-      </div>
-      <p className="text-sm text-muted-foreground">
-        {r.subject} · {r.author}
-      </p>
-      <ChangeSummary changes={r.changes} />
-      <p className="pr-meta text-muted-foreground">
-        {when(r.updatedAt)} · <code>{short(r.head)}</code> · attempt {r.attempt}
-      </p>
-      <div className="pr-badges">
-        <Badge>{label(r.resolverState)}</Badge>
-      </div>
-      {!r.dismissed && r.attention && (
-        <CardIssue reviewFailed={r.reviewState === "needs_attention"} />
-      )}
-      {!r.dismissed && r.resolverError && !r.attention && <ResolverIssue />}
-      <div className="pr-actions">
-        <Action icon="Zap" onClick={() => open(r)}>
-          Details
-        </Action>
-        {r.url && !r.running && !r.dismissed && (
-          <Action
-            variant="outline"
-            icon="Play"
-            disabled={!!busy}
-            onClick={() => void run(r.id, () => start([r.url!], false))}
-          >
-            Review latest changes
-          </Action>
-        )}
-        {!r.running &&
-          (r.dismissed ? (
-            <Action
-              variant="outline"
-              disabled={!!busy}
-              onClick={() =>
-                void run(`restore-${r.id}`, () => action(r, "restore"))
-              }
-            >
-              Restore
-            </Action>
-          ) : (
-            <Action
-              variant="outline"
-              disabled={!!busy}
-              onClick={() =>
-                void run(`dismiss-${r.id}`, () => action(r, "dismiss"))
-              }
-            >
-              Dismiss run
-            </Action>
-          ))}
-        {r.url && (
-          <Action
-            variant="outline"
-            icon="ExternalLink"
-            onClick={() => navigate.openUrl(r.url!)}
-          >
-            Open PR
-          </Action>
-        )}
-      </div>
-    </article>
-  );
-  return (
-    <div className="pr-page bg-background text-foreground">
-      <ResolverLoopDialog
-        open={resolverDialogOpen}
-        defaultRounds={data?.preferences.resolverMaxRounds ?? 3}
-        busy={busy === "resolver-loop"}
-        onOpenChange={setResolverDialogOpen}
-        onStart={(maxRounds) =>
-          run("resolver-loop", () => startResolverLoop(maxRounds))
-        }
-      />
-      {!detailOpen && (
-        <div className="pr-overview">
-          <section className="pr-start border border-border bg-card">
-            <div className="pr-heading">
-              <h2>Start a Pair Review</h2>
-            </div>
-            <p className="text-muted-foreground text-sm">
-              Paste GitHub pull request URLs. When PR Briefings is enabled, its
-              independent report starts concurrently.
-            </p>
-            <form
-              className="pr-start-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void run("start", () => start(urls.trim().split(/\s+/)));
-              }}
-            >
-              <Input
-                value={urls}
-                onChange={(e) => setUrls(e.target.value)}
-                placeholder="Paste GitHub pull request URLs"
-                aria-label="GitHub pull request URLs"
-              />
-              <Action
-                type="submit"
-                icon="Play"
-                disabled={!!busy || !urls.trim() || !data?.health.ready}
-              >
-                Start Pair Review
-              </Action>
-              <Action
-                type="button"
-                variant="outline"
-                icon="RefreshCw"
-                disabled={!!busy || queueLoading}
-                onClick={() => void refreshQueue()}
-              >
-                {queueLoading ? "Refreshing GitHub…" : "Refresh from GitHub"}
-              </Action>
-            </form>
-            <details className="pr-local">
-              <summary>
-                <Icon name="ChevronRight" className="pr-local-chevron size-4" />
-                <div>
-                  <strong>Local checkout or branch</strong>
-                  <span className="text-muted-foreground">
-                    Analyze committed changes without a pull request.
-                  </span>
-                </div>
-              </summary>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void run("local", async () => {
-                    const input = {
-                      urls: [],
-                      local: {
-                        path: local.path,
-                        branch: local.branch,
-                        ...(local.base ? { base: local.base } : {}),
-                      },
-                    };
-                    const preview = await rpc.call("preview", input);
-                    if (
-                      !window.confirm(
-                        `Review committed branch ${local.branch}? Resolved base: ${preview.base} (${preview.baseSha}). Head: ${preview.head}. Publication is disabled.`,
-                      )
-                    )
-                      return;
-                    const result = await rpc.call("start", {
-                      ...input,
-                      local: {
-                        ...input.local,
-                        expectedHead: preview.head,
-                        expectedBase: preview.baseSha,
-                      },
-                    });
-                    navigate.toPluginPanel("reviews", {
-                      subPath: `${result.batchId}/0`,
-                    });
-                  });
-                }}
-              >
-                <Input
-                  placeholder="Absolute checkout path"
-                  aria-label="Local checkout path"
-                  value={local.path}
-                  onChange={(e) => setLocal({ ...local, path: e.target.value })}
-                />
-                <Input
-                  placeholder="Branch"
-                  aria-label="Local branch"
-                  value={local.branch}
-                  onChange={(e) =>
-                    setLocal({ ...local, branch: e.target.value })
-                  }
-                />
-                <Input
-                  placeholder="Base (optional)"
-                  aria-label="Local base"
-                  value={local.base}
-                  onChange={(e) => setLocal({ ...local, base: e.target.value })}
-                />
-                <Action
-                  type="submit"
-                  disabled={
-                    !!busy ||
-                    !local.path ||
-                    !local.branch ||
-                    !data?.health.ready
-                  }
-                >
-                  Confirm local review
-                </Action>
-              </form>
-            </details>
-            <div className="pr-health text-sm text-muted-foreground">
-              <span
-                className={`pr-dot ${data?.health.ready ? "pr-dot-ready" : ""}`}
-              />
-              {data?.health.repository ? (
-                <a
-                  className="pr-repository-link"
-                  href={data.health.repository.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={`Pair Review ${data.health.version ?? "unknown"} · Pi ${data.health.reviewModel} · shared database · port ${data.health.port}`}
-                >
-                  {data.health.repository.name}
-                  <Icon name="ExternalLink" className="size-3" />
-                </a>
-              ) : data ? (
-                "Pair Review"
-              ) : (
-                "Checking Pair Review…"
+  const selectedQueue = queue.filter((q) => selected.has(q.key));
+  const setTab = (next: OverviewTab) => {
+    lastOverviewTab = next;
+    setTabState(next);
+  };
+  const primaryRequest = (q: QueueItem) =>
+    REQUEST_ORDER.find((tag) => q.tags.includes(tag)) ?? "Other direct request";
+  const requestParts: BarPart[] = REQUEST_ORDER.map((tag, index) => ({
+    id: tag,
+    label: REQUEST_LABELS[tag],
+    value: queue.filter((q) => primaryRequest(q) === tag).length,
+    color: rampColor(index),
+  })).filter((part) => part.value > 0);
+  const fromTeam = queue.filter(
+    (q) =>
+      q.tags.includes("Team request") || q.tags.includes("Teammate request"),
+  ).length;
+  const reviewStatus = (r: ReviewRow) =>
+    r.running && !r.superseded ? (
+      <RunningIndicator />
+    ) : r.dismissed ? (
+      <Badge>Dismissed</Badge>
+    ) : r.superseded ? (
+      <Badge>Historical attempt</Badge>
+    ) : r.attention ? (
+      <Badge tone="danger">
+        {r.reviewState === "needs_attention"
+          ? "Review failed"
+          : "Needs attention"}
+      </Badge>
+    ) : completedReview(r) ? (
+      <span className="pr-statuses">
+        <FindingCount count={r.count} />
+        {isOutdated(r) && <Badge tone="finding">Outdated</Badge>}
+      </span>
+    ) : (
+      <Badge>{label(r.reviewState)}</Badge>
+    );
+  const reviewIcon = (r: ReviewRow): { name: string; tone: Tone } =>
+    r.dismissed
+      ? { name: "Archive", tone: "neutral" }
+      : r.running && !r.superseded
+        ? { name: "Loading", tone: "info" }
+        : r.attention
+          ? { name: "AlertTriangle", tone: "bad" }
+          : completedReview(r)
+            ? r.count
+              ? { name: "FileText", tone: "warn" }
+              : { name: "CircleCheck", tone: "good" }
+            : { name: "Clock", tone: "neutral" };
+  const reviewRow = (r: ReviewRow) => {
+    const icon = reviewIcon(r);
+    return (
+      <article className="pr-row" key={r.id}>
+        <span className="pr-row-icon" aria-hidden="true">
+          <Icon
+            name={icon.name}
+            className={cn("size-4", TONE_TEXT[icon.tone])}
+          />
+        </span>
+        <div className="pr-row-main">
+          <h3 title={r.title}>{r.title}</h3>
+          <p className="pr-row-meta">
+            {r.subject} · {r.author} · {when(r.updatedAt)} ·{" "}
+            <code>{short(r.head)}</code> · attempt {r.attempt}
+          </p>
+          {(resolverCardLabel(r.resolverState) ||
+            (!r.dismissed && (r.attention || r.resolverError))) && (
+            <div className="pr-row-notes">
+              {resolverCardLabel(r.resolverState) && (
+                <Badge tone="running">
+                  {resolverCardLabel(r.resolverState)}
+                </Badge>
               )}
-              {data && <span>Updated {when(data.updatedAt)}</span>}
-            </div>
-            {data?.health.error && (
-              <details className="pr-health-error" role="alert">
-                <summary className="text-destructive text-sm">
-                  Pair Review needs attention
-                </summary>
-                <p className="text-sm text-muted-foreground">
-                  {data.health.error}
-                </p>
-              </details>
-            )}
-          </section>
-          {(error || actionError) && (
-            <div
-              className="pr-error text-destructive border border-border"
-              role="alert"
-            >
-              {error || actionError}
-              <Action variant="outline" onClick={() => void refresh()}>
-                Retry connection
-              </Action>
+              {!r.dismissed && r.attention && (
+                <CardIssue reviewFailed={r.reviewState === "needs_attention"} />
+              )}
+              {!r.dismissed && r.resolverError && !r.attention && (
+                <ResolverIssue />
+              )}
             </div>
           )}
-          {data?.warnings.length ? (
-            <div
-              className="pr-error text-destructive border border-border"
-              role="status"
+        </div>
+        <div className="pr-row-size">
+          <ChangeSummary changes={r.changes} />
+        </div>
+        <div className="pr-row-status">{reviewStatus(r)}</div>
+        <div className="pr-row-actions">
+          <Action size="sm" onClick={() => open(r)}>
+            Details
+          </Action>
+          {r.url && !r.running && !r.dismissed && (
+            <IconAction
+              icon="Play"
+              label="Review latest changes"
+              disabled={!!busy}
+              onClick={() => void run(r.id, () => start([r.url!], false))}
+            />
+          )}
+          {!r.running &&
+            (r.dismissed ? (
+              <Action
+                size="sm"
+                variant="outline"
+                disabled={!!busy}
+                onClick={() =>
+                  void run(`restore-${r.id}`, () => action(r, "restore"))
+                }
+              >
+                Restore
+              </Action>
+            ) : (
+              <IconAction
+                icon="Archive"
+                label="Dismiss run"
+                disabled={!!busy}
+                onClick={() =>
+                  void run(`dismiss-${r.id}`, () => action(r, "dismiss"))
+                }
+              />
+            ))}
+          {r.url && (
+            <IconAction
+              icon="ExternalLink"
+              label="Open PR"
+              onClick={() => navigate.openUrl(r.url!)}
+            />
+          )}
+        </div>
+      </article>
+    );
+  };
+  const queueStatus = (q: QueueItem) =>
+    runningKeys.has(q.key) || busy === q.key ? (
+      <RunningIndicator />
+    ) : issueFor(q.key) ? (
+      <Badge tone="danger">
+        {issueFor(q.key)?.reviewState === "needs_attention"
+          ? "Review failed"
+          : "Needs attention"}
+      </Badge>
+    ) : q.freshness === "current" && completedFor(q.key) ? (
+      <FindingCount count={completedFor(q.key)!.count} />
+    ) : (
+      <Badge tone={q.freshness === "stale" ? "finding" : "neutral"}>
+        {q.freshness === "stale"
+          ? "Outdated"
+          : q.freshness === "current"
+            ? "Reviewed"
+            : q.freshness === "unknown"
+              ? "Freshness unknown"
+              : "Not reviewed"}
+      </Badge>
+    );
+  const queueRow = (q: QueueItem) => {
+    const reviewRunning = running.some((r) => r.key === q.key);
+    return (
+      <article
+        className={cn(
+          "pr-row pr-queue-row",
+          selected.has(q.key) && "pr-row-selected",
+        )}
+        key={q.key}
+      >
+        <span className="pr-row-select">
+          <input
+            type="checkbox"
+            aria-label={`Select ${q.subject}`}
+            checked={selected.has(q.key)}
+            onChange={(e) =>
+              setSelected((prev) => {
+                const next = new Set(prev);
+                e.target.checked ? next.add(q.key) : next.delete(q.key);
+                return next;
+              })
+            }
+          />
+        </span>
+        <div className="pr-row-main">
+          <h3 title={q.title}>{q.title}</h3>
+          <p className="pr-row-meta">
+            {q.subject} · {q.author}
+            {q.previousAt && (
+              <>
+                {" "}
+                · Reviewed {when(q.previousAt)} · {q.previousModel}
+              </>
+            )}
+          </p>
+          {issueFor(q.key) && (
+            <div className="pr-row-notes">
+              <CardIssue
+                reviewFailed={
+                  issueFor(q.key)?.reviewState === "needs_attention"
+                }
+              />
+            </div>
+          )}
+        </div>
+        <div className="pr-row-tags">
+          {q.tags.map((t) => (
+            <DotLabel
+              key={t}
+              tone={
+                t === "Team request" || t === "Teammate request"
+                  ? "info"
+                  : t === "Authored"
+                    ? "good"
+                    : "neutral"
+              }
             >
-              {data.warnings.map((w, i) => (
-                <p key={i}>{w}</p>
-              ))}
-            </div>
-          ) : null}
-          <section
-            className="pr-queue-controls"
-            aria-labelledby="pr-queue-controls-title"
-          >
-            <div className="pr-queue-controls-heading">
-              <div>
-                <h2 id="pr-queue-controls-title">Filter and batch PR queue</h2>
-                <p className="text-sm text-muted-foreground">
-                  These controls apply to Your PR queue below; running and
-                  retained reviews remain unchanged.
-                </p>
+              {t}
+            </DotLabel>
+          ))}
+        </div>
+        <div className="pr-row-size">
+          <ChangeSummary changes={q.changes} />
+        </div>
+        <div className="pr-row-updated">
+          <span className="sr-only">Last updated </span>
+          {q.updatedAt ? relativeUpdatedAt(q.updatedAt) : "unknown"}
+        </div>
+        <div className="pr-row-status">{queueStatus(q)}</div>
+        <div className="pr-row-actions">
+          <Action size="sm" onClick={() => openPR(q)}>
+            Details
+          </Action>
+          <IconAction
+            icon="Play"
+            label={
+              busy === q.key
+                ? "Starting review…"
+                : reviewRunning
+                  ? "Review running"
+                  : "Review latest changes"
+            }
+            disabled={!!busy || !data?.health.ready || reviewRunning}
+            onClick={() => void run(q.key, () => start([q.url], false))}
+          />
+          <IconAction
+            icon="ExternalLink"
+            label="Open PR"
+            onClick={() => navigate.openUrl(q.url)}
+          />
+        </div>
+      </article>
+    );
+  };
+  const reviewPanel = (
+    id: OverviewTab,
+    title: string,
+    description: string,
+    rowsInPanel: ReviewRow[],
+    empty: string,
+  ) => (
+    <section
+      id={`pr-${id}`}
+      className="pr-panel"
+      aria-labelledby={`pr-${id}-title`}
+    >
+      <h2 id={`pr-${id}-title`} className="sr-only">
+        {title}
+      </h2>
+      <p className="pr-panel-caption">{description}</p>
+      {rowsInPanel.length ? (
+        <div className="pr-rows">{rowsInPanel.map(reviewRow)}</div>
+      ) : (
+        <Empty>{empty}</Empty>
+      )}
+    </section>
+  );
+  const overviewTabs: TabSpec<OverviewTab>[] = [
+    { id: "queue", label: "PR Queue", count: queue.length },
+    {
+      id: "running",
+      label: "Running",
+      count: running.length,
+      adornment: running.length ? (
+        <span className="pr-spinner pr-spinner-small" aria-hidden="true" />
+      ) : undefined,
+    },
+    { id: "attention", label: "Needs attention", count: attention.length },
+    { id: "final", label: "Final Review", count: finalReviewRows.length },
+    { id: "recent", label: "Recent reviews", count: recentRows.length },
+    { id: "dismissed", label: "Dismissed", count: dismissedRows.length },
+  ];
+  // ---- Details: shared derived values ----------------------------------
+  const detailRow = details?.row ?? null;
+  const attempts = detailRow
+    ? allRows
+        .filter((r) => r.key === detailRow.key)
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    : [];
+  const queueEntry = detailRow
+    ? (data?.queue ?? []).find((q) => q.key === detailRow.key)
+    : undefined;
+  const praiseCount = details?.findings.filter(isPraise).length ?? 0;
+  const actionableCount = (details?.findings.length ?? 0) - praiseCount;
+  const activeDetailTab: DetailTab =
+    detailTab ?? (details ? "findings" : "changes");
+  const attemptTitle = (r: ReviewRow) =>
+    r.running && !r.superseded
+      ? "Review running"
+      : r.attention
+        ? r.reviewState === "needs_attention"
+          ? "Review failed"
+          : "Needs attention"
+        : completedReview(r)
+          ? r.count
+            ? `${r.count} ${r.count === 1 ? "finding" : "findings"}`
+            : "No findings"
+          : label(r.reviewState);
+  const attemptTone = (r: ReviewRow): Tone =>
+    r.running && !r.superseded
+      ? "info"
+      : r.attention
+        ? "bad"
+        : completedReview(r)
+          ? r.count
+            ? "warn"
+            : "good"
+          : "neutral";
+  const progress = (r: ReviewRow) => {
+    const done = completedReview(r);
+    const triaged = done && (r.finalReview || r.count === 0);
+    const failed = !!r.attention && !r.running;
+    return [
+      { title: "Queued", detail: r.subject, status: "done" as StepStatus },
+      {
+        title: "Reviewed",
+        detail: r.running
+          ? "Pair Review is running"
+          : `${r.model.split("/").pop()} · ${when(r.updatedAt)}`,
+        status: (r.running
+          ? "current"
+          : failed
+            ? "blocked"
+            : done
+              ? "done"
+              : "current") as StepStatus,
+      },
+      {
+        title: "Triage findings",
+        detail: done
+          ? `${r.count} ${r.count === 1 ? "finding" : "findings"}`
+          : "After the review",
+        status: (triaged
+          ? "done"
+          : done && !r.submitted
+            ? "current"
+            : r.submitted
+              ? "done"
+              : "todo") as StepStatus,
+      },
+      {
+        title: "Final review",
+        detail: r.submitted
+          ? "Submitted on GitHub"
+          : "Submit on GitHub yourself",
+        status: (r.submitted
+          ? "done"
+          : triaged && !isOutdated(r)
+            ? "current"
+            : "todo") as StepStatus,
+      },
+    ];
+  };
+  const openBriefing = (briefing: Details["briefing"]) => {
+    if (!briefing.file || !briefing.hostId) return;
+    const accepted = navigate.experimental_openFilePreview({
+      target: { kind: "host", hostId: briefing.hostId, path: briefing.file },
+      location: null,
+    });
+    if (!accepted)
+      setActionError("BB could not open the briefing in the side panel.");
+  };
+  const feedbackPanel = (feedback: Details["feedback"], intro: string) => (
+    <section className="pr-panel" aria-labelledby="pr-feedback-title">
+      <div className="pr-panel-heading">
+        <h2 id="pr-feedback-title">Human PR feedback</h2>
+        <Badge>{feedback.complete ? "Complete snapshot" : "Unavailable"}</Badge>
+      </div>
+      <p className="pr-panel-caption">{intro}</p>
+      {!feedback.comments.length && (
+        <p className="text-muted-foreground">
+          {feedback.complete
+            ? "No unresolved human feedback was found."
+            : feedback.error || "Human feedback is unavailable."}
+        </p>
+      )}
+      {feedback.comments.map((c, i) => (
+        <article className="pr-feedback" key={i}>
+          <div className="pr-heading">
+            <h3>
+              {c.author} · {c.location}
+            </h3>
+            {c.disposition && <Badge>{label(c.disposition)}</Badge>}
+          </div>
+          <Markdown content={c.body} />
+          {c.reason && (
+            <p className="text-sm text-muted-foreground">
+              Resolver: {c.reason}
+            </p>
+          )}
+        </article>
+      ))}
+    </section>
+  );
+  return (
+    <TooltipProvider delayDuration={300}>
+      <div className="pr-page bg-background text-foreground">
+        <ResolverLoopDialog
+          open={resolverDialogOpen}
+          defaultRounds={data?.preferences.resolverMaxRounds ?? 3}
+          busy={busy === "resolver-loop"}
+          onOpenChange={setResolverDialogOpen}
+          onStart={(maxRounds) =>
+            run("resolver-loop", () => startResolverLoop(maxRounds))
+          }
+        />
+        {!detailOpen && (
+          <div className="pr-overview">
+            <header className="pr-page-header">
+              <div className="pr-page-title">
+                <h1>Pair Review</h1>
+                <div className="pr-health text-sm text-muted-foreground">
+                  <span className="pr-health-source">
+                    <span
+                      className={`pr-dot ${data?.health.ready ? "pr-dot-ready" : ""}`}
+                    />
+                    {data?.health.repository ? (
+                      <a
+                        className="pr-repository-link"
+                        href={data.health.repository.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Pair Review ${data.health.version ?? "unknown"} · ${data.health.provider ?? "pi"} ${data.health.reviewModel ?? ""} · shared database · port ${data.health.port}`}
+                      >
+                        {data.health.repository.name}
+                        <Icon name="ExternalLink" className="size-3" />
+                      </a>
+                    ) : data ? (
+                      "Pair Review"
+                    ) : (
+                      "Checking Pair Review…"
+                    )}
+                  </span>
+                  {data && (
+                    <span
+                      className="pr-health-updated"
+                      title={
+                        data.queueRefreshedAt
+                          ? `Last refreshed ${when(data.queueRefreshedAt)}`
+                          : undefined
+                      }
+                    >
+                      {data.queueRefreshedAt &&
+                      relativeRefreshedAt(data.queueRefreshedAt)
+                        ? `Refreshed ${relativeRefreshedAt(data.queueRefreshedAt)}`
+                        : "Not refreshed yet"}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="pr-queue-controls-heading-actions">
-                <Badge>{filtered.length} visible</Badge>
-                <Action
-                  disabled={!selected.size || !!busy || !data?.health.ready}
-                  onClick={() =>
-                    void run("batch", () =>
-                      start(
-                        queue
-                          .filter((q) => selected.has(q.key))
-                          .map((q) => q.url),
-                      ),
-                    )
-                  }
+              <div className="pr-quick-start">
+                <form
+                  className="pr-quick-start-form"
+                  aria-label="Start a Pair Review"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run("start", () => start(urls.trim().split(/\s+/)));
+                  }}
                 >
-                  Review selected ({selected.size})
-                </Action>
+                  <Input
+                    className="pr-quick-start-input"
+                    value={urls}
+                    onChange={(e) => setUrls(e.target.value)}
+                    placeholder="Paste GitHub PR URLs to review"
+                    aria-label="GitHub pull request URLs"
+                    aria-describedby="pr-quick-start-help"
+                  />
+                  <Action
+                    type="submit"
+                    size="sm"
+                    icon="Play"
+                    disabled={!!busy || !urls.trim() || !data?.health.ready}
+                  >
+                    Start Pair Review
+                  </Action>
+                  <Action
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    icon="RotateCcw"
+                    disabled={!!busy || queueLoading}
+                    onClick={() => void refreshQueue()}
+                  >
+                    {queueLoading ? "Refreshing GitHub…" : "Refresh from GitHub"}
+                  </Action>
+                </form>
+                <div className="pr-quick-start-meta">
+                  <span id="pr-quick-start-help">
+                    Separate several URLs with spaces. PR Briefings starts
+                    alongside when enabled.
+                  </span>
+                  <button
+                    type="button"
+                    className="pr-text-button"
+                    onClick={() => setLocalOpen(true)}
+                  >
+                    Review a local branch…
+                  </button>
+                </div>
               </div>
-            </div>
-            {queueError && (
+            </header>
+            {data?.health.error && (
+              <Callout
+                tone="bad"
+                role="alert"
+                title="Pair Review needs attention"
+              >
+                <details className="pr-health-error">
+                  <summary className="text-sm">Show the error</summary>
+                  <p className="text-sm text-muted-foreground">
+                    {data.health.error}
+                  </p>
+                </details>
+              </Callout>
+            )}
+            {(error || actionError) && (
               <div
                 className="pr-error text-destructive border border-border"
                 role="alert"
               >
-                GitHub queue could not be refreshed: {queueError}
+                {error || actionError}
                 <Action
                   variant="outline"
-                  disabled={queueLoading}
-                  onClick={() => void refreshQueue()}
+                  size="sm"
+                  onClick={() => void refresh()}
                 >
-                  Retry PR discovery
+                  Retry connection
                 </Action>
               </div>
             )}
-            <div className="pr-filters">
-              {queueFilters.map(([t, title]) => (
-                <Action
-                  key={t}
-                  variant={filter === t ? "default" : "outline"}
-                  onClick={() => setFilter(t)}
-                >
-                  {title}
-                  <Badge>
-                    {t === "All"
-                      ? repoQueue.length
-                      : repoQueue.filter((q) => q.tags.includes(t)).length}
-                  </Badge>
-                </Action>
-              ))}
-            </div>
-            <div className="pr-queue-tools">
-              <label className="pr-repo-filter">
-                Repository
-                <select
-                  aria-label="Filter by repository"
-                  value={repoFilter}
-                  onChange={(e) => setRepoFilter(e.target.value)}
-                >
-                  <option value="All">All repositories</option>
-                  {repositories.map((repo) => (
-                    <option key={repo} value={repo}>
-                      {repo}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Input
-                placeholder="Search PRs"
-                aria-label="Search PR queue"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Action
-                variant="outline"
-                onClick={() => setSelected(new Set(filtered.map((q) => q.key)))}
+            {data?.warnings.length ? (
+              <div
+                className="pr-error text-destructive border border-border"
+                role="status"
               >
-                Select visible
-              </Action>
-              <Action variant="outline" onClick={() => setSelected(new Set())}>
-                Clear selection
-              </Action>
-            </div>
-          </section>
-          <nav
-            className="pr-jump border border-border bg-card"
-            aria-label="Review sections"
-          >
-            <span>Jump to</span>
-            {(
-              [
-                ["running", "Running", running.length],
-                ["recent", "Recent", recentRows.length],
-                ["queue", "Queue", queue.length],
-                ["attention", "Needs attention", attention.length],
-                ["dismissed", "Dismissed", dismissedRows.length],
-              ] as const
-            ).map(([id, title, count]) => (
-              <button
-                key={id}
-                onClick={() => {
-                  setCollapsed((prev) => {
-                    const next = new Set(prev);
-                    next.delete(id);
-                    return next;
-                  });
-                  document
-                    .getElementById(`pr-${id}`)
-                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                }}
-              >
-                {title}
-                <Badge>{count}</Badge>
-              </button>
-            ))}
-            <Action
-              variant="outline"
-              onClick={() =>
-                setCollapsed(
-                  collapsed.size === 5
-                    ? new Set()
-                    : new Set([
-                        "queue",
-                        "running",
-                        "attention",
-                        "recent",
-                        "dismissed",
-                      ]),
-                )
-              }
-            >
-              {collapsed.size === 5 ? "Expand all" : "Collapse all"}
-            </Action>
-          </nav>
-          {section(
-            "running",
-            "Running",
-            running.length,
-            "Closing this page does not cancel a running batch.",
-            <>
-              <div className="pr-card-grid">{running.map(card)}</div>
-              {!running.length && <Empty>No reviews are running.</Empty>}
-            </>,
-          )}
-          {section(
-            "recent",
-            "Recent reviews",
-            recentRows.length,
-            "Completed reviews and historical attempts. Results stay local.",
-            <>
-              <div className="pr-card-grid">{recentRows.map(card)}</div>
-              {!recentRows.length && <Empty>No retained reviews yet.</Empty>}
-            </>,
-          )}
-          {section(
-            "queue",
-            "Your PR queue",
-            queue.length,
-            "Review requests, assigned PRs, and PRs you authored on GitHub.",
-            <>
-              <div className="pr-card-grid" aria-busy={queueLoading}>
-                {filtered.map((q) => (
-                  <article
-                    className="pr-review-card border border-border bg-card"
-                    key={q.key}
-                  >
-                    <div className="pr-heading">
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${q.subject}`}
-                        checked={selected.has(q.key)}
-                        onChange={(e) =>
-                          setSelected((prev) => {
-                            const next = new Set(prev);
-                            e.target.checked
-                              ? next.add(q.key)
-                              : next.delete(q.key);
-                            return next;
-                          })
-                        }
-                      />
-                      <h3 title={q.title}>{q.title}</h3>
-                      {runningKeys.has(q.key) || busy === q.key ? (
-                        <RunningIndicator />
-                      ) : issueFor(q.key) ? (
-                        <Badge tone="danger">
-                          {issueFor(q.key)?.reviewState === "needs_attention"
-                            ? "Review failed"
-                            : "Needs attention"}
-                        </Badge>
-                      ) : q.freshness === "current" && completedFor(q.key) ? (
-                        <FindingCount count={completedFor(q.key)!.count} />
-                      ) : (
-                        <Badge
-                          tone={q.freshness === "stale" ? "finding" : "neutral"}
-                        >
-                          {q.freshness === "stale"
-                            ? "Outdated"
-                            : q.freshness === "current"
-                              ? "Reviewed"
-                              : q.freshness === "unknown"
-                                ? "Freshness unknown"
-                                : "Not reviewed"}
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      {q.subject} · {q.author}
-                    </p>
-                    <ChangeSummary changes={q.changes} />
-                    <div className="pr-badges">
-                      {q.tags.map((t) => (
-                        <Badge key={t}>{t}</Badge>
-                      ))}
-                    </div>
-                    <p className="pr-meta text-muted-foreground">
-                      Last updated{" "}
-                      {q.updatedAt ? relativeUpdatedAt(q.updatedAt) : "unknown"}
-                    </p>
-                    {issueFor(q.key) && (
-                      <CardIssue
-                        reviewFailed={
-                          issueFor(q.key)?.reviewState === "needs_attention"
-                        }
-                      />
-                    )}
-                    {q.previousAt && (
-                      <p className="pr-meta text-muted-foreground">
-                        Reviewed {when(q.previousAt)} · {q.previousModel}
-                      </p>
-                    )}
-                    <div className="pr-actions">
-                      <Action icon="Zap" onClick={() => openPR(q)}>
-                        Details
-                      </Action>
-                      <Action
-                        variant="outline"
-                        icon="Play"
-                        disabled={
-                          !!busy ||
-                          !data?.health.ready ||
-                          running.some((r) => r.key === q.key)
-                        }
-                        onClick={() =>
-                          void run(q.key, () => start([q.url], false))
-                        }
-                      >
-                        {busy === q.key
-                          ? "Starting review…"
-                          : running.some((r) => r.key === q.key)
-                            ? "Review running"
-                            : "Review latest changes"}
-                      </Action>
-                      <Action
-                        variant="outline"
-                        icon="ExternalLink"
-                        onClick={() => navigate.openUrl(q.url)}
-                      >
-                        Open PR
-                      </Action>
-                    </div>
-                  </article>
+                {data.warnings.map((w, i) => (
+                  <p key={i}>{w}</p>
                 ))}
               </div>
-              {!filtered.length && (
-                <Empty>
-                  {!data || queueLoading
-                    ? "Loading your GitHub PR queue…"
-                    : queueError
-                      ? "PR discovery failed. Retry above; no partial queue was saved."
-                      : search
-                        ? "No matching PRs."
-                        : queue.length
-                          ? "No PRs match this filter."
-                          : "No open PRs match your review requests, assignments, or authorship. Current reviews may be hidden in settings."}
-                </Empty>
-              )}
-            </>,
-          )}
-          {section(
-            "attention",
-            "Needs attention",
-            attention.length,
-            "Preserved work, stale refs, and validation needs.",
-            <>
-              <div className="pr-card-grid">{attention.map(card)}</div>
-              {!attention.length && <Empty>Nothing needs attention.</Empty>}
-            </>,
-          )}
-          {section(
-            "dismissed",
-            "Dismissed runs",
-            dismissedRows.length,
-            "Hidden from active lists. Evidence remains retained and can be restored.",
-            <>
-              <div className="pr-card-grid">{dismissedRows.map(card)}</div>
-              {!dismissedRows.length && <Empty>No dismissed runs.</Empty>}
-            </>,
-          )}
-        </div>
-      )}
-      {detailOpen && (
-        <main className="pr-detail border-border">
-          <Action
-            variant="ghost"
-            icon="ArrowLeft"
-            onClick={() => navigate.toPluginPanel("reviews")}
-          >
-            Overview
-          </Action>
-          {actionError && (
-            <p role="alert" className="pr-error text-destructive">
-              {actionError}
-            </p>
-          )}
-          {detailsError && (
-            <p role="alert" className="pr-error text-destructive">
-              {detailsError}
-            </p>
-          )}
-          {(!data || (!details && !prInfo)) && !detailsError && (
-            <Empty>Loading review details…</Empty>
-          )}
-          {prInfo && !details && !selection && data && !detailsError && (
-            <>
-              <header className="pr-detail-header">
-                <div className="pr-heading">
-                  <h1>{prInfo.title}</h1>
-                  {busy === "latest" ? (
-                    <RunningIndicator />
-                  ) : (
-                    <Badge>Not reviewed</Badge>
-                  )}
-                </div>
-                <p>
-                  {prInfo.subject} · {prInfo.author}
-                </p>
-                <p className="pr-meta text-muted-foreground">
-                  Latest discovered head:{" "}
-                  <code title={prInfo.head}>{short(prInfo.head)}</code>
-                </p>
-                <ChangeSummary changes={prInfo.changes} />
-                <div className="pr-actions">
-                  <Action
-                    icon="Play"
-                    disabled={
-                      !!busy ||
-                      !data.health.ready ||
-                      running.some((r) => r.key === prInfo.key)
-                    }
-                    onClick={() =>
-                      void run("latest", () => start([prInfo.url], false))
-                    }
-                  >
-                    Review latest changes
-                  </Action>
-                  {prCanResolve && (
-                    <Action
-                      icon="RefreshCw"
-                      disabled={!!busy}
-                      onClick={() => setResolverDialogOpen(true)}
-                    >
-                      Start resolver loop
-                    </Action>
-                  )}
-                  <Action
-                    variant="outline"
-                    icon="ExternalLink"
-                    disabled={!!busy}
-                    onClick={() =>
-                      void run("pair-review-app", async () => {
-                        const { url } = await rpc.call("openFork", {
-                          url: prInfo.url,
-                        });
-                        navigate.openUrl(url);
-                      })
-                    }
-                  >
-                    Open Pair Review
-                  </Action>
-                  <Action
-                    variant="outline"
-                    icon="GitPullRequest"
-                    onClick={() => navigate.openUrl(prInfo.url)}
-                  >
-                    Pull request
-                  </Action>
-                  <Action
-                    variant="outline"
-                    icon="RefreshCw"
-                    disabled={queueLoading}
-                    onClick={() => void refreshQueue()}
-                  >
-                    {queueLoading
-                      ? "Refreshing GitHub…"
-                      : "Refresh from GitHub"}
-                  </Action>
-                </div>
-              </header>
-              {prBriefing && (
-                <BriefingCard
-                  briefing={prBriefing}
-                  busy={!!busy}
-                  onOpen={() => {
-                    if (!prBriefing.file || !prBriefing.hostId) return;
-                    const accepted = navigate.experimental_openFilePreview({
-                      target: {
-                        kind: "host",
-                        hostId: prBriefing.hostId,
-                        path: prBriefing.file,
-                      },
-                      location: null,
-                    });
-                    if (!accepted)
-                      setActionError(
-                        "BB could not open the briefing in the side panel.",
-                      );
-                  }}
-                  onGenerate={() =>
-                    void run("brief", () =>
-                      rpc.call("briefingGenerate", { url: prInfo.url }),
-                    )
+            ) : null}
+            <section
+              className="pr-frame pr-summary"
+              aria-label="Review summary"
+            >
+              <MetricRow>
+                <Metric
+                  label="PR queue"
+                  value={queue.length}
+                  note={
+                    data?.health.teams?.length || data?.health.teammates?.length
+                      ? `${fromTeam} from your team`
+                      : "Requests, assignments and your PRs"
                   }
+                  tone="info"
+                  active={tab === "queue"}
+                  onClick={() => setTab("queue")}
+                />
+                {running.length > 0 && (
+                  <Metric
+                    label="Running"
+                    value={running.length}
+                    note="Keeps going if you leave"
+                    tone="info"
+                    active={tab === "running"}
+                    onClick={() => setTab("running")}
+                  />
+                )}
+                <Metric
+                  label="Needs attention"
+                  value={attention.length}
+                  note="Failed or unverifiable runs"
+                  tone={attention.length ? "warn" : "neutral"}
+                  active={tab === "attention"}
+                  onClick={() => setTab("attention")}
+                />
+                <Metric
+                  label="Final review"
+                  value={finalReviewRows.length}
+                  note="Every finding triaged"
+                  tone={finalReviewRows.length ? "good" : "neutral"}
+                  active={tab === "final"}
+                  onClick={() => setTab("final")}
+                />
+                <Metric
+                  label="Recent reviews"
+                  value={recentRows.length}
+                  note="Retained results"
+                  active={tab === "recent"}
+                  onClick={() => setTab("recent")}
+                />
+              </MetricRow>
+              {requestParts.length > 1 && (
+                <SegmentedBar
+                  parts={requestParts}
+                  unit="PRs"
+                  selected={tab === "queue" && filter !== "All" ? filter : null}
+                  onSelect={(id) => {
+                    setFilter(filter === id && tab === "queue" ? "All" : id);
+                    setTab("queue");
+                  }}
                 />
               )}
-              <section className="pr-card border border-border bg-card">
-                <h2>Review summary</h2>
-                <p>
-                  No retained review is available for this PR. Opening Details
-                  does not start a review. Choose Review latest changes to run
-                  Pair Review on the current committed changes.
-                </p>
-              </section>
-              <CodeChanges
-                patches={prPatches}
-                selectedFile={selectedFile}
-                onSelectedFile={setSelectedFile}
-                error={prPatchError}
-              />
-              <section className="pr-card border border-border bg-card">
-                <div className="pr-heading">
-                  <h2>Resolver loop</h2>
-                  <Badge>{prFeedback?.comments.length ?? 0} comments</Badge>
+            </section>
+            <Dialog open={localOpen} onOpenChange={setLocalOpen}>
+              <DialogContent className="sm:max-w-[600px]">
+                <DialogHeader>
+                  <DialogTitle>Review a local branch</DialogTitle>
+                  <DialogDescription>
+                    Review committed changes from a branch that already exists
+                    on this computer. Publication is disabled for local reviews.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="pr-local-guidance text-sm text-muted-foreground">
+                  Pair Review compares the committed tip of your branch with a
+                  base ref. Uncommitted changes are not included. At the
+                  repository root, run <code>pwd</code> for the checkout path
+                  and <code>git branch --show-current</code> for the branch
+                  name.
                 </div>
-                <p className="text-muted-foreground">
-                  A resolver loop can begin from existing human feedback without
-                  first running Pair Review. It judges each comment for factual
-                  correctness, relevance, and PR scope before editing, then uses
-                  Pair Review for each follow-up gate.
-                </p>
-                {prCanResolve && (
-                  <Action
-                    icon="Play"
-                    disabled={!!busy}
-                    onClick={() => setResolverDialogOpen(true)}
-                  >
-                    Start resolver loop
-                  </Action>
-                )}
-                {prFeedback?.error && (
-                  <p className="text-destructive">{prFeedback.error}</p>
-                )}
-              </section>
-              {prFeedback && (
-                <section className="pr-card border border-border bg-card">
-                  <div className="pr-heading">
-                    <h2>Human PR feedback</h2>
-                    <Badge>
-                      {prFeedback.complete
-                        ? "Complete snapshot"
-                        : "Unavailable"}
-                    </Badge>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Read-only unresolved review threads, review summaries, and
-                    PR conversation from people other than the PR author.
-                  </p>
-                  <Action
-                    variant="outline"
-                    onClick={() => setShowFeedback(!showFeedback)}
-                  >
-                    {showFeedback ? "Hide feedback" : "Show feedback"}
-                  </Action>
-                  {showFeedback && !prFeedback.comments.length && (
-                    <p className="text-muted-foreground">
-                      {prFeedback.complete
-                        ? "No unresolved human feedback was found."
-                        : prFeedback.error || "Human feedback is unavailable."}
-                    </p>
-                  )}
-                  {showFeedback &&
-                    prFeedback.comments.map((comment, index) => (
-                      <article className="pr-feedback" key={index}>
-                        <h3>
-                          {comment.author} · {comment.location}
-                        </h3>
-                        <Markdown content={comment.body} />
-                      </article>
-                    ))}
-                </section>
-              )}
-            </>
-          )}
-          {details && data && (
-            <>
-              <header className="pr-detail-header">
-                <div className="pr-heading">
-                  <h1>{details.row.title}</h1>
-                  {details.row.running || busy === "latest" ? (
-                    <RunningIndicator />
-                  ) : details.row.dismissed ? (
-                    <Badge>Dismissed</Badge>
-                  ) : details.row.attention ? (
-                    <Badge tone="danger">Needs attention</Badge>
-                  ) : completedReview(details.row) ? (
-                    <span className="pr-statuses">
-                      <FindingCount count={details.row.count} />
-                      {isOutdated(details.row) && (
-                        <Badge tone="finding">Outdated</Badge>
-                      )}
+                <form
+                  className="pr-local-dialog-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run("local", async () => {
+                      const input = {
+                        urls: [],
+                        local: {
+                          path: local.path,
+                          branch: local.branch,
+                          ...(local.base ? { base: local.base } : {}),
+                        },
+                      };
+                      const preview = await rpc.call("preview", input);
+                      if (
+                        !window.confirm(
+                          `Review committed branch ${local.branch}? Resolved base: ${preview.base} (${preview.baseSha}). Head: ${preview.head}. Publication is disabled.`,
+                        )
+                      )
+                        return;
+                      const result = await rpc.call("start", {
+                        ...input,
+                        local: {
+                          ...input.local,
+                          expectedHead: preview.head,
+                          expectedBase: preview.baseSha,
+                        },
+                      });
+                      setLocalOpen(false);
+                      navigate.toPluginPanel("reviews", {
+                        subPath: `${result.batchId}/0`,
+                      });
+                    });
+                  }}
+                >
+                  <label className="pr-local-field pr-local-path">
+                    <span>Absolute checkout path</span>
+                    <Input
+                      placeholder="/Users/you/Code/repository"
+                      aria-label="Local checkout path"
+                      aria-describedby="pr-local-path-help"
+                      value={local.path}
+                      onChange={(e) =>
+                        setLocal({ ...local, path: e.target.value })
+                      }
+                    />
+                    <small
+                      id="pr-local-path-help"
+                      className="text-muted-foreground"
+                    >
+                      Full path to the local Git checkout; use <code>pwd</code>{" "}
+                      at its root.
+                    </small>
+                  </label>
+                  <label className="pr-local-field">
+                    <span>Branch</span>
+                    <Input
+                      placeholder="feature/my-change"
+                      aria-label="Local branch"
+                      aria-describedby="pr-local-branch-help"
+                      value={local.branch}
+                      onChange={(e) =>
+                        setLocal({ ...local, branch: e.target.value })
+                      }
+                    />
+                    <small
+                      id="pr-local-branch-help"
+                      className="text-muted-foreground"
+                    >
+                      Local branch containing the committed changes to review.
+                    </small>
+                  </label>
+                  <label className="pr-local-field">
+                    <span>
+                      Base ref{" "}
+                      <span className="text-muted-foreground">(optional)</span>
                     </span>
-                  ) : (
-                    <Badge>{label(details.row.reviewState)}</Badge>
-                  )}
-                </div>
-                <p>
-                  {details.row.subject} · {details.row.author}
-                </p>
-                <p className="pr-meta text-muted-foreground">
-                  {when(details.row.updatedAt)} · pi · {details.row.model} ·{" "}
-                  <code title={details.row.head}>
-                    {short(details.row.head)}
-                  </code>
-                </p>
-                <ChangeSummary changes={details.changes} />
-                <div className="pr-actions">
-                  <Action
-                    variant="outline"
-                    icon="ExternalLink"
-                    disabled={!!busy}
-                    onClick={() =>
-                      void run("pair-review-app", async () => {
-                        const { url } = await rpc.call("openFork", {
-                          batchId: details.row.batchId,
-                          index: details.row.index,
-                        });
-                        navigate.openUrl(url);
-                      })
-                    }
+                    <Input
+                      placeholder="origin/main"
+                      aria-label="Local base"
+                      aria-describedby="pr-local-base-help"
+                      value={local.base}
+                      onChange={(e) =>
+                        setLocal({ ...local, base: e.target.value })
+                      }
+                    />
+                    <small
+                      id="pr-local-base-help"
+                      className="text-muted-foreground"
+                    >
+                      Compare from this ref, such as <code>origin/main</code>.
+                      Blank uses <code>origin/HEAD</code>.
+                    </small>
+                  </label>
+                  <DialogFooter className="pr-local-dialog-footer">
+                    <Action
+                      type="button"
+                      variant="outline"
+                      onClick={() => setLocalOpen(false)}
+                    >
+                      Cancel
+                    </Action>
+                    <Action
+                      type="submit"
+                      icon="Play"
+                      disabled={
+                        !!busy ||
+                        !local.path ||
+                        !local.branch ||
+                        !data?.health.ready
+                      }
+                    >
+                      Confirm local review
+                    </Action>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+            <section className="pr-frame" aria-label="Pair Review lists">
+              <Tabs
+                label="Pair Review lists"
+                tabs={overviewTabs}
+                value={tab}
+                onChange={setTab}
+              >
+                {tab === "queue" && (
+                  <section
+                    id="pr-queue"
+                    className="pr-panel"
+                    aria-labelledby="pr-queue-title"
                   >
-                    Open Pair Review
-                  </Action>
-                  {details.row.url && (
+                    <h2 id="pr-queue-title" className="sr-only">
+                      PR Queue
+                    </h2>
+                    <p className="pr-panel-caption">
+                      Review requests, assigned PRs, and authored PRs not
+                      already represented in another list.
+                    </p>
+                    {queueError && (
+                      <div
+                        className="pr-error text-destructive border border-border"
+                        role="alert"
+                      >
+                        GitHub queue could not be refreshed: {queueError}
+                        <Action
+                          variant="outline"
+                          size="sm"
+                          disabled={queueLoading}
+                          onClick={() => void refreshQueue()}
+                        >
+                          Retry PR discovery
+                        </Action>
+                      </div>
+                    )}
+                    <div className="pr-toolbar" aria-label="PR queue filters">
+                      <div
+                        className="pr-filters"
+                        role="group"
+                        aria-label="Request type"
+                      >
+                        {queueFilters.map(([t, title]) => (
+                          <button
+                            type="button"
+                            key={t}
+                            className="pr-filter"
+                            aria-pressed={filter === t}
+                            onClick={() => setFilter(t)}
+                          >
+                            {title}
+                            <span className="pr-filter-count">
+                              {t === "All"
+                                ? repoQueue.length
+                                : repoQueue.filter((q) => q.tags.includes(t))
+                                    .length}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="pr-queue-tools">
+                        <Picker
+                          label="Filter by repository"
+                          value={repoFilter}
+                          onChange={setRepoFilter}
+                          className="pr-repo-picker"
+                          options={[
+                            { value: "All", label: "All repositories" },
+                            ...repositories.map((repo) => ({
+                              value: repo,
+                              label: repo,
+                            })),
+                          ]}
+                        />
+                        <Input
+                          className="pr-search"
+                          placeholder="Search title, number or author"
+                          aria-label="Search PR queue"
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                        />
+                        <span className="pr-toolbar-spacer" />
+                        <span className="pr-visible-count">
+                          {filtered.length} visible
+                        </span>
+                        <Action
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setSelected(new Set(filtered.map((q) => q.key)))
+                          }
+                        >
+                          Select visible
+                        </Action>
+                        <Action
+                          size="sm"
+                          variant="ghost"
+                          disabled={!selected.size}
+                          onClick={() => setSelected(new Set())}
+                        >
+                          Clear selection
+                        </Action>
+                        <Action
+                          size="sm"
+                          icon="Layers"
+                          disabled={
+                            !selectedQueue.length ||
+                            !!busy ||
+                            !data?.health.ready
+                          }
+                          onClick={() =>
+                            void run("batch", () =>
+                              start(selectedQueue.map((q) => q.url)),
+                            )
+                          }
+                        >
+                          Review selected ({selectedQueue.length})
+                        </Action>
+                      </div>
+                    </div>
+                    {filtered.length > 0 && (
+                      <div className="pr-rows" aria-busy={queueLoading}>
+                        <div
+                          className="pr-row pr-queue-row pr-row-header"
+                          aria-hidden="true"
+                        >
+                          <span />
+                          <span>Pull request</span>
+                          <span>Request</span>
+                          <span>Size</span>
+                          <span>Updated</span>
+                          <span>Status</span>
+                          <span />
+                        </div>
+                        {filtered.map(queueRow)}
+                      </div>
+                    )}
+                    {!filtered.length && (
+                      <Empty>
+                        {!data || queueLoading
+                          ? "Loading your GitHub PR queue…"
+                          : queueError
+                            ? "PR discovery failed. Retry above; no partial queue was saved."
+                            : search
+                              ? "No matching PRs."
+                              : queue.length
+                                ? "No PRs match this filter."
+                                : "No open PRs match your review requests, assignments, or authorship. Current reviews may be hidden in settings."}
+                      </Empty>
+                    )}
+                  </section>
+                )}
+                {tab === "running" &&
+                  reviewPanel(
+                    "running",
+                    "Running",
+                    "Closing this page does not cancel a running batch.",
+                    running,
+                    "No reviews are running.",
+                  )}
+                {tab === "recent" &&
+                  reviewPanel(
+                    "recent",
+                    "Recent reviews",
+                    "Completed reviews and historical attempts. Results stay local.",
+                    recentRows,
+                    "No retained reviews yet.",
+                  )}
+                {tab === "final" &&
+                  reviewPanel(
+                    "final",
+                    "Final Review",
+                    "Reviewed PRs with no findings or with every finding accepted or dismissed.",
+                    finalReviewRows,
+                    "No PRs are ready for final review.",
+                  )}
+                {tab === "attention" &&
+                  reviewPanel(
+                    "attention",
+                    "Needs attention",
+                    "Preserved work, stale refs, and validation needs.",
+                    attention,
+                    "Nothing needs attention.",
+                  )}
+
+                {tab === "dismissed" &&
+                  reviewPanel(
+                    "dismissed",
+                    "Dismissed runs",
+                    "Hidden from active lists. Evidence remains retained and can be restored.",
+                    dismissedRows,
+                    "No dismissed runs.",
+                  )}
+              </Tabs>
+            </section>
+            {data && (
+              <section className="pr-frame" aria-label="Setup health">
+                <Disclosure
+                  open={healthOpen}
+                  onToggle={() => setHealthOpen(!healthOpen)}
+                  header={
+                    <span className="pr-disclosure-header">
+                      <Chevron open={healthOpen} />
+                      <strong>Setup health</strong>
+                      <DotLabel tone={data.health.ready ? "good" : "bad"}>
+                        {data.health.ready ? "Ready" : "Not ready"}
+                      </DotLabel>
+                    </span>
+                  }
+                >
+                  {() => (
+                    <div className="pr-health-details">
+                      <KeyValue
+                        pairs={[
+                          [
+                            "Pair Review",
+                            `${data.health.version ?? "unknown version"}${data.health.databaseSchema ? ` · schema ${data.health.databaseSchema}` : ""}`,
+                          ],
+                          [
+                            "Review",
+                            `${data.health.provider ?? "pi"} · ${data.health.reviewModel ?? data.preferences.reviewModel}`,
+                          ],
+                          [
+                            "Resolver",
+                            `${data.health.resolverProvider ?? "pi"} · ${data.health.fixModel ?? data.preferences.fixModel}`,
+                          ],
+                          [
+                            "Teams",
+                            data.health.teams?.length
+                              ? data.health.teams.join(", ")
+                              : "None configured",
+                          ],
+                          [
+                            "Teammates",
+                            data.health.teammates?.length
+                              ? `${data.health.teammates.length} configured`
+                              : "None configured",
+                          ],
+                          [
+                            "Database",
+                            `Shared${data.health.port ? ` · port ${data.health.port}` : ""}`,
+                          ],
+                        ]}
+                      />
+                    </div>
+                  )}
+                </Disclosure>
+              </section>
+            )}
+          </div>
+        )}
+        {detailOpen && (
+          <main className="pr-detail border-border">
+            <Action
+              variant="ghost"
+              size="sm"
+              icon="ArrowLeft"
+              onClick={() => navigate.toPluginPanel("reviews")}
+            >
+              Overview
+            </Action>
+            {actionError && (
+              <p role="alert" className="pr-error text-destructive">
+                {actionError}
+              </p>
+            )}
+            {detailsError && (
+              <p role="alert" className="pr-error text-destructive">
+                {detailsError}
+              </p>
+            )}
+            {(!data || (!details && !prInfo)) && !detailsError && (
+              <Empty>Loading review details…</Empty>
+            )}
+            {prInfo && !details && !selection && data && !detailsError && (
+              <>
+                <header className="pr-detail-header">
+                  <div className="pr-heading">
+                    <h1>{prInfo.title}</h1>
+                    {busy === "latest" ? (
+                      <RunningIndicator />
+                    ) : (
+                      <Badge>Not reviewed</Badge>
+                    )}
+                  </div>
+                  <p className="pr-detail-meta">
+                    {prInfo.subject} · {prInfo.author} ·{" "}
+                    <code>{prInfo.branch}</code> → latest discovered head{" "}
+                    <code title={prInfo.head}>{short(prInfo.head)}</code>
+                  </p>
+                  <div className="pr-actions">
+                    <Action
+                      icon="Play"
+                      disabled={
+                        !!busy ||
+                        !data.health.ready ||
+                        running.some((r) => r.key === prInfo.key)
+                      }
+                      onClick={() =>
+                        void run("latest", () => start([prInfo.url], false))
+                      }
+                    >
+                      Review latest changes
+                    </Action>
+                    {prCanResolve && (
+                      <Action
+                        variant="outline"
+                        icon="RotateCcw"
+                        disabled={!!busy}
+                        onClick={() => setResolverDialogOpen(true)}
+                      >
+                        Start resolver loop
+                      </Action>
+                    )}
+                    <Action
+                      variant="outline"
+                      icon="ExternalLink"
+                      disabled={!!busy}
+                      onClick={() =>
+                        void run("pair-review-app", async () => {
+                          const { url } = await rpc.call("openFork", {
+                            url: prInfo.url,
+                          });
+                          navigate.openUrl(url);
+                        })
+                      }
+                    >
+                      Open Pair Review
+                    </Action>
                     <Action
                       variant="outline"
                       icon="GitPullRequest"
-                      onClick={() => navigate.openUrl(details.row.url!)}
+                      onClick={() => navigate.openUrl(prInfo.url)}
                     >
                       Pull request
                     </Action>
-                  )}
-                  {details.row.canResolve && (
                     <Action
-                      icon="RefreshCw"
-                      disabled={!!busy || details.row.running}
-                      onClick={() => setResolverDialogOpen(true)}
-                    >
-                      Start resolver loop
-                    </Action>
-                  )}
-                  {details.row.url && (
-                    <Action
-                      variant="outline"
-                      icon="RefreshCw"
+                      variant="ghost"
+                      icon="RotateCcw"
                       disabled={queueLoading}
                       onClick={() => void refreshQueue()}
                     >
@@ -1625,411 +1990,629 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                         ? "Refreshing GitHub…"
                         : "Refresh from GitHub"}
                     </Action>
-                  )}
-                  {details.row.url && (
-                    <Action
-                      icon="Zap"
-                      disabled={!!busy || details.row.running}
-                      onClick={() =>
-                        void run("latest", () =>
-                          start([details.row.url!], false),
+                  </div>
+                </header>
+                <section className="pr-frame" aria-label="At a glance">
+                  <MetricRow>
+                    <ChangeMetric changes={prInfo.changes} />
+                    <Metric
+                      label="Human feedback"
+                      value={prFeedback?.comments.length ?? 0}
+                      note={
+                        prFeedback?.complete
+                          ? "Unresolved comments"
+                          : "Snapshot unavailable"
+                      }
+                    />
+                    <Metric
+                      label="Pair Review"
+                      value="Not reviewed"
+                      note="Opening Details never starts analysis"
+                    />
+                  </MetricRow>
+                </section>
+                {prBriefing && (
+                  <BriefingCard
+                    briefing={prBriefing}
+                    busy={!!busy}
+                    onOpen={() => openBriefing(prBriefing)}
+                    onOpenThread={() => {
+                      if (prBriefing.threadId)
+                        navigate.toThread(prBriefing.threadId);
+                    }}
+                    onGenerate={() =>
+                      void run("brief", () =>
+                        rpc.call("briefingGenerate", { url: prInfo.url }),
+                      )
+                    }
+                  />
+                )}
+                <section
+                  className="pr-frame"
+                  aria-labelledby="pr-summary-title"
+                >
+                  <h2 id="pr-summary-title">Review summary</h2>
+                  <p>
+                    No retained review is available for this PR. Opening Details
+                    does not start a review. Choose Review latest changes to run
+                    Pair Review on the current committed changes.
+                  </p>
+                </section>
+                <section className="pr-frame" aria-label="Pull request details">
+                  <Tabs
+                    label="Pull request details"
+                    value={activeDetailTab}
+                    onChange={setDetailTab}
+                    tabs={[
+                      {
+                        id: "changes",
+                        label: "Changes",
+                        count: prPatches.length,
+                      },
+                      {
+                        id: "feedback",
+                        label: "Feedback",
+                        count: prFeedback?.comments.length ?? 0,
+                      },
+                      { id: "resolver", label: "Resolver loop" },
+                    ]}
+                  >
+                    {activeDetailTab === "changes" && (
+                      <CodeChanges
+                        patches={prPatches}
+                        selectedFile={selectedFile}
+                        onSelectedFile={setSelectedFile}
+                        error={prPatchError}
+                      />
+                    )}
+                    {activeDetailTab === "feedback" &&
+                      (prFeedback ? (
+                        feedbackPanel(
+                          prFeedback,
+                          "Read-only unresolved review threads, review summaries, and PR conversation from people other than the PR author.",
                         )
+                      ) : (
+                        <Empty>Human feedback is unavailable.</Empty>
+                      ))}
+                    {activeDetailTab === "resolver" && (
+                      <section
+                        className="pr-panel"
+                        aria-labelledby="pr-resolver-title"
+                      >
+                        <div className="pr-panel-heading">
+                          <h2 id="pr-resolver-title">Resolver loop</h2>
+                          <Badge>
+                            {prFeedback?.comments.length ?? 0} comments
+                          </Badge>
+                        </div>
+                        <p className="pr-panel-caption">
+                          A resolver loop can begin from existing human feedback
+                          without first running Pair Review. It judges each
+                          comment for factual correctness, relevance, and PR
+                          scope before editing, then uses Pair Review for each
+                          follow-up gate.
+                        </p>
+                        {prCanResolve && (
+                          <Action
+                            icon="Play"
+                            disabled={!!busy}
+                            onClick={() => setResolverDialogOpen(true)}
+                          >
+                            Start resolver loop
+                          </Action>
+                        )}
+                        {prFeedback?.error && (
+                          <p className="text-destructive">{prFeedback.error}</p>
+                        )}
+                      </section>
+                    )}
+                  </Tabs>
+                </section>
+              </>
+            )}
+            {details && detailRow && data && (
+              <>
+                <header className="pr-detail-header">
+                  <div className="pr-heading">
+                    <h1>{detailRow.title}</h1>
+                    {detailRow.running || busy === "latest" ? (
+                      <RunningIndicator />
+                    ) : detailRow.dismissed ? (
+                      <Badge>Dismissed</Badge>
+                    ) : detailRow.attention ? (
+                      <Badge tone="danger">Needs attention</Badge>
+                    ) : completedReview(detailRow) ? (
+                      <span className="pr-statuses">
+                        <FindingCount count={detailRow.count} />
+                        {isOutdated(detailRow) && (
+                          <Badge tone="finding">Outdated</Badge>
+                        )}
+                      </span>
+                    ) : (
+                      <Badge>{label(detailRow.reviewState)}</Badge>
+                    )}
+                  </div>
+                  <p className="pr-detail-meta">
+                    {detailRow.subject} · {detailRow.author}
+                    {detailRow.branch && (
+                      <>
+                        {" "}
+                        · <code>{detailRow.branch}</code>
+                      </>
+                    )}{" "}
+                    →{" "}
+                    <code title={detailRow.head}>{short(detailRow.head)}</code>{" "}
+                    · {when(detailRow.updatedAt)} ·{" "}
+                    {data.health.provider ?? "pi"} · {detailRow.model}
+                  </p>
+                  <div className="pr-actions">
+                    {detailRow.url && (
+                      <Action
+                        icon="Play"
+                        disabled={!!busy || detailRow.running}
+                        onClick={() =>
+                          void run("latest", () =>
+                            start([detailRow.url!], false),
+                          )
+                        }
+                      >
+                        {detailRow.attention
+                          ? "Start fresh review"
+                          : "Review latest changes"}
+                      </Action>
+                    )}
+                    {detailRow.canResolve && (
+                      <Action
+                        variant="outline"
+                        icon="RotateCcw"
+                        disabled={!!busy || detailRow.running}
+                        onClick={() => setResolverDialogOpen(true)}
+                      >
+                        Start resolver loop
+                      </Action>
+                    )}
+                    <Action
+                      variant="outline"
+                      icon="ExternalLink"
+                      disabled={!!busy}
+                      onClick={() =>
+                        void run("pair-review-app", async () => {
+                          const { url } = await rpc.call("openFork", {
+                            batchId: detailRow.batchId,
+                            index: detailRow.index,
+                          });
+                          navigate.openUrl(url);
+                        })
                       }
                     >
-                      {details.row.attention
-                        ? "Start fresh review"
-                        : "Review latest changes"}
+                      Open Pair Review
                     </Action>
-                  )}
-                  {!details.row.running &&
-                    (details.row.dismissed ? (
+                    {detailRow.url && (
+                      <Action
+                        variant="outline"
+                        icon="GitPullRequest"
+                        onClick={() => navigate.openUrl(detailRow.url!)}
+                      >
+                        Pull request
+                      </Action>
+                    )}
+                    {detailRow.running && (
                       <Action
                         variant="outline"
                         disabled={!!busy}
                         onClick={() =>
-                          void run("restore", () =>
-                            action(details.row, "restore"),
+                          void run("cancel", () => action(detailRow, "cancel"))
+                        }
+                      >
+                        Stop review
+                      </Action>
+                    )}
+                    {detailRow.running && (
+                      <Action
+                        variant="outline"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void run("recover", () =>
+                            action(detailRow, "recover"),
                           )
                         }
                       >
-                        Restore run
+                        Recover if stopped
                       </Action>
-                    ) : (
+                    )}
+                    {detailRow.url && (
                       <Action
                         variant="ghost"
-                        disabled={!!busy}
-                        onClick={() =>
-                          void run("dismiss", async () => {
-                            if (await action(details.row, "dismiss"))
-                              navigate.toPluginPanel("reviews");
-                          })
-                        }
+                        icon="RotateCcw"
+                        disabled={queueLoading}
+                        onClick={() => void refreshQueue()}
                       >
-                        Dismiss run
+                        {queueLoading
+                          ? "Refreshing GitHub…"
+                          : "Refresh from GitHub"}
                       </Action>
-                    ))}
-                  {details.row.running && (
-                    <Action
-                      variant="outline"
-                      disabled={!!busy}
-                      onClick={() =>
-                        void run("cancel", () => action(details.row, "cancel"))
-                      }
-                    >
-                      Cancel batch
-                    </Action>
-                  )}
-                  {details.row.running && (
-                    <Action
-                      variant="outline"
-                      disabled={!!busy}
-                      onClick={() =>
-                        void run("recover", () =>
-                          action(details.row, "recover"),
-                        )
-                      }
-                    >
-                      Recover if stopped
-                    </Action>
-                  )}
-                </div>
-              </header>
-              <BriefingCard
-                briefing={details.briefing}
-                busy={!!busy}
-                onOpen={() => {
-                  if (!details.briefing.file || !details.briefing.hostId)
-                    return;
-                  const accepted = navigate.experimental_openFilePreview({
-                    target: {
-                      kind: "host",
-                      hostId: details.briefing.hostId,
-                      path: details.briefing.file,
-                    },
-                    location: null,
-                  });
-                  if (!accepted)
-                    setActionError(
-                      "BB could not open the briefing in the side panel.",
-                    );
-                }}
-                onGenerate={() => {
-                  if (!details.row.url) return;
-                  void run("brief", () =>
-                    rpc.call("briefingGenerate", { url: details.row.url! }),
-                  );
-                }}
-              />
-              {details.row.reviewState !== "needs_attention" && (
-                <section className="pr-card border border-border bg-card">
-                  <h2>Review summary</h2>
-                  <p>{details.summary}</p>
-                  {data?.queue.find(
-                    (q) =>
-                      q.key === details.row.key && q.head !== details.row.head,
-                  ) && (
-                    <p className="text-destructive">
-                      This review describes an earlier PR head. Review latest
-                      changes before using these findings.
-                    </p>
-                  )}
-                </section>
-              )}
-              <CodeChanges
-                patches={details.patches}
-                selectedFile={selectedFile}
-                onSelectedFile={setSelectedFile}
-              />
-              {details.row.attention && (
-                <section className="pr-card pr-attention-card border border-border bg-card">
-                  <h2>
-                    {details.row.reviewState === "needs_attention"
-                      ? "Review could not finish"
-                      : "Human decision required"}
-                  </h2>
-                  <p>
-                    {details.row.reviewState === "needs_attention"
-                      ? "Pair Review stopped before it could produce verified findings. Start a fresh review or inspect the technical details below."
-                      : "This review has retained work that needs a person to inspect before continuing."}
-                  </p>
-                  <details className="pr-diagnostics">
-                    <summary>Technical details</summary>
-                    <p className="text-destructive">{details.row.attention}</p>
-                    <p>
-                      Reviewed head: <code>{details.row.head}</code>
-                    </p>
-                    {details.row.path && (
-                      <p className="pr-path">
-                        Work preserved at:{" "}
-                        <FileLink
-                          target={{
-                            kind: "host",
-                            hostId: data!.hostId,
-                            path: details.row.path,
-                          }}
+                    )}
+                    {!detailRow.running &&
+                      (detailRow.dismissed ? (
+                        <Action
+                          variant="outline"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void run("restore", () =>
+                              action(detailRow, "restore"),
+                            )
+                          }
                         >
-                          {details.row.path}
-                        </FileLink>
-                      </p>
-                    )}
-                  </details>
-                  <div className="pr-actions">
-                    {details.row.canAttempt && !details.row.url && (
-                      <Action
-                        variant="outline"
-                        disabled={!!busy || details.row.running}
-                        onClick={() =>
-                          void run("attempt", () =>
-                            action(details.row, "attempt"),
-                          )
-                        }
-                      >
-                        Fresh review attempt
-                      </Action>
-                    )}
-                    {details.row.canRetry && (
-                      <Action
-                        variant="outline"
-                        disabled={!!busy || details.row.running}
-                        onClick={() =>
-                          void run("retry", () => action(details.row, "retry"))
-                        }
-                      >
-                        Retry optional resolution
-                      </Action>
-                    )}
-                    {details.row.canValidate && (
-                      <Action
-                        disabled={!!busy || details.row.running}
-                        onClick={() =>
-                          void run("validate", () =>
-                            action(details.row, "validate"),
-                          )
-                        }
-                      >
-                        {details.row.publish
-                          ? "Publish human-validated fixes"
-                          : "Commit human-validated fixes locally"}
-                      </Action>
-                    )}
+                          Restore run
+                        </Action>
+                      ) : (
+                        <Action
+                          variant="ghost"
+                          icon="Archive"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void run("dismiss", async () => {
+                              if (await action(detailRow, "dismiss"))
+                                navigate.toPluginPanel("reviews");
+                            })
+                          }
+                        >
+                          Dismiss run
+                        </Action>
+                      ))}
                   </div>
-                </section>
-              )}
-              {details.row.resolverError && !details.row.attention && (
-                <section className="pr-card border border-border bg-card">
-                  <h2>Review completed; resolver run failed</h2>
-                  <p>
-                    Pair Review completed successfully. Its findings remain
-                    available; no resolver fixes were accepted.
-                  </p>
-                  <p className="text-destructive">
-                    {details.row.resolverError}
-                  </p>
-                  {details.row.path && (
-                    <p className="pr-path">
-                      Resolver checkout retained for diagnostics at:{" "}
-                      <FileLink
-                        target={{
-                          kind: "host",
-                          hostId: data!.hostId,
-                          path: details.row.path,
-                        }}
-                      >
-                        {details.row.path}
-                      </FileLink>
-                    </p>
-                  )}
-                  {details.row.canRetry && (
-                    <div className="pr-actions">
-                      <Action
-                        variant="outline"
-                        disabled={!!busy || details.row.running}
-                        onClick={() =>
-                          void run("retry", () => action(details.row, "retry"))
-                        }
-                      >
-                        Retry optional resolution
-                      </Action>
-                    </div>
-                  )}
-                </section>
-              )}
-              <section className="pr-findings">
-                <div className="pr-findings-heading">
-                  <div>
-                    <h2>Findings</h2>
-                    <p className="text-sm text-muted-foreground">
-                      Review observations from the exact captured changes.
-                    </p>
-                  </div>
-                  <FindingCount count={details.findings.length} prominent />
-                </div>
-                {!details.findings.length ? (
-                  <Empty>No findings for this run.</Empty>
-                ) : (
-                  <div className="pr-finding-list">
-                    {details.findings.map((f, index) => (
-                      <article
-                        className="pr-finding border border-border bg-card"
-                        key={f.id}
-                      >
-                        <header className="pr-finding-header">
-                          <span className="pr-finding-index" aria-hidden="true">
-                            {index + 1}
-                          </span>
-                          <div className="pr-finding-title">
-                            <h3>{f.title}</h3>
-                            <p
-                              className="pr-finding-location"
-                              title={`${f.file}${f.line ? `:${f.line}` : ""}`}
-                            >
-                              {f.sourcePath ? (
-                                <FileLink
-                                  target={{
-                                    kind: "host",
-                                    hostId: data!.hostId,
-                                    path: f.sourcePath,
-                                  }}
-                                  location={
-                                    f.line
-                                      ? {
-                                          kind: "line",
-                                          line: f.line,
-                                          column: null,
-                                        }
-                                      : undefined
-                                  }
-                                >
-                                  {f.file}
-                                  {f.line ? `:${f.line}` : ""}
-                                </FileLink>
-                              ) : (
-                                <>
-                                  {f.file}
-                                  {f.line ? `:${f.line}` : ""}
-                                </>
-                              )}
-                            </p>
-                          </div>
-                          <div className="pr-finding-tags">
-                            {f.kind && (
-                              <Badge
-                                tone={
-                                  f.kind === "praise" ? "neutral" : "finding"
-                                }
-                              >
-                                {label(f.kind)}
-                              </Badge>
-                            )}
-                            {f.severity && <Badge>{label(f.severity)}</Badge>}
-                            {f.disposition && (
-                              <Badge>{label(f.disposition)}</Badge>
-                            )}
-                          </div>
-                        </header>
-                        <div className="pr-finding-body">
-                          <section className="pr-finding-comment">
-                            <h4>Comment</h4>
-                            <Markdown content={f.body} />
-                          </section>
-                          {f.suggestion && (
-                            <section className="pr-finding-suggestion">
-                              <h4>Suggestion</h4>
-                              <Markdown content={f.suggestion} />
-                            </section>
-                          )}
-                        </div>
-                        {f.reason && (
-                          <footer className="pr-finding-resolution">
-                            <strong>Resolution note</strong>
-                            <span>{f.reason}</span>
-                          </footer>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-              <section className="pr-card border border-border bg-card">
-                <div className="pr-heading">
-                  <h2>Resolver activity</h2>
-                  <Badge>{label(details.row.resolverState)}</Badge>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Read-only recent session activity. No shared writer is
-                  attached.
-                </p>
-                {details.activity.length ? (
-                  <div className="pr-activity">
-                    {details.activity.map((line, i) => (
-                      <pre key={i}>{line}</pre>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-muted-foreground">
-                    No resolver activity captured.
-                  </p>
-                )}
-              </section>
-              <section className="pr-card border border-border bg-card">
-                <div className="pr-heading">
-                  <h2>Human PR feedback</h2>
-                  <Badge>
-                    {details.feedback.complete
-                      ? "Complete snapshot"
-                      : "Unavailable"}
-                  </Badge>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Read-only snapshot of unresolved review threads, review
-                  summaries, and PR conversation from people other than the PR
-                  author. On a PR you own, a manual resolver loop can
-                  disposition every item for truth, relevance, and scope;
-                  nothing is posted to GitHub.
-                </p>
-                <Action
-                  className="pr-feedback-toggle"
-                  variant="outline"
-                  onClick={() => setShowFeedback(!showFeedback)}
+                </header>
+                <section
+                  className="pr-frame pr-summary"
+                  aria-label="At a glance"
                 >
-                  {showFeedback ? "Hide feedback" : "Show feedback"}
-                </Action>
-                {showFeedback && (
-                  <>
-                    {!details.feedback.comments.length && (
-                      <p className="text-muted-foreground">
-                        {details.feedback.complete
-                          ? "No unresolved human feedback was found."
-                          : details.feedback.error ||
-                            "Human feedback is unavailable."}
+                  <MetricRow>
+                    <Metric
+                      label="Findings"
+                      value={completedReview(detailRow) ? actionableCount : "—"}
+                      note={
+                        completedReview(detailRow)
+                          ? praiseCount
+                            ? `+ ${praiseCount} praise`
+                            : "Actionable"
+                          : "No verified results yet"
+                      }
+                      tone={
+                        completedReview(detailRow) && actionableCount
+                          ? "warn"
+                          : "neutral"
+                      }
+                      active={activeDetailTab === "findings"}
+                      onClick={() => setDetailTab("findings")}
+                    />
+                    <ChangeMetric
+                      changes={details.changes}
+                      active={activeDetailTab === "changes"}
+                      onClick={() => setDetailTab("changes")}
+                    />
+                    <Metric
+                      label="Attempts"
+                      value={attempts.length}
+                      note={(() => {
+                        const failed = attempts.filter(
+                          (r) => r.reviewState === "needs_attention",
+                        ).length;
+                        return failed ? `${failed} failed` : "None failed";
+                      })()}
+                      active={activeDetailTab === "history"}
+                      onClick={() => setDetailTab("history")}
+                    />
+                    <Metric
+                      label="Freshness"
+                      value={
+                        !queueEntry
+                          ? "Not in queue"
+                          : isOutdated(detailRow)
+                            ? "New commits"
+                            : "Current"
+                      }
+                      note={
+                        !queueEntry
+                          ? "Closed, merged or local"
+                          : isOutdated(detailRow)
+                            ? `GitHub head is now ${short(queueEntry.head)}`
+                            : "Head unchanged since review"
+                      }
+                      tone={
+                        !queueEntry
+                          ? "neutral"
+                          : isOutdated(detailRow)
+                            ? "warn"
+                            : "good"
+                      }
+                    />
+                  </MetricRow>
+                  <Steps label="Review progress" items={progress(detailRow)} />
+                </section>
+                {detailRow.attention && (
+                  <section
+                    className="pr-frame pr-attention-card"
+                    aria-labelledby="pr-attention-title"
+                  >
+                    <Callout
+                      tone="bad"
+                      title={
+                        <h2 id="pr-attention-title">
+                          {detailRow.reviewState === "needs_attention"
+                            ? "Review could not finish"
+                            : "Human decision required"}
+                        </h2>
+                      }
+                    >
+                      <p>
+                        {detailRow.reviewState === "needs_attention"
+                          ? "Pair Review stopped before it could produce verified findings. Start a fresh review or inspect the technical details below."
+                          : "This review has retained work that needs a person to inspect before continuing."}
+                      </p>
+                    </Callout>
+                    <details className="pr-diagnostics">
+                      <summary>Technical details</summary>
+                      <p className="text-destructive">{detailRow.attention}</p>
+                      <p>
+                        Reviewed head: <code>{detailRow.head}</code>
+                      </p>
+                      {detailRow.path && (
+                        <p className="pr-path">
+                          Work preserved at:{" "}
+                          <FileLink
+                            target={{
+                              kind: "host",
+                              hostId: data.hostId,
+                              path: detailRow.path,
+                            }}
+                          >
+                            {detailRow.path}
+                          </FileLink>
+                        </p>
+                      )}
+                    </details>
+                    <div className="pr-actions">
+                      {detailRow.canAttempt && !detailRow.url && (
+                        <Action
+                          variant="outline"
+                          disabled={!!busy || detailRow.running}
+                          onClick={() =>
+                            void run("attempt", () =>
+                              action(detailRow, "attempt"),
+                            )
+                          }
+                        >
+                          Fresh review attempt
+                        </Action>
+                      )}
+                      {detailRow.canRetry && (
+                        <Action
+                          variant="outline"
+                          disabled={!!busy || detailRow.running}
+                          onClick={() =>
+                            void run("retry", () => action(detailRow, "retry"))
+                          }
+                        >
+                          Retry optional resolution
+                        </Action>
+                      )}
+                      {detailRow.canValidate && (
+                        <Action
+                          disabled={!!busy || detailRow.running}
+                          onClick={() =>
+                            void run("validate", () =>
+                              action(detailRow, "validate"),
+                            )
+                          }
+                        >
+                          {detailRow.publish
+                            ? "Publish human-validated fixes"
+                            : "Commit human-validated fixes locally"}
+                        </Action>
+                      )}
+                    </div>
+                  </section>
+                )}
+                {detailRow.resolverError && !detailRow.attention && (
+                  <section
+                    className="pr-frame"
+                    aria-labelledby="pr-resolver-error-title"
+                  >
+                    <Callout
+                      tone="warn"
+                      title={
+                        <h2 id="pr-resolver-error-title">
+                          Review completed; resolver run failed
+                        </h2>
+                      }
+                    >
+                      <p>
+                        Pair Review completed successfully. Its findings remain
+                        available; no resolver fixes were accepted.
+                      </p>
+                      <p className="text-destructive">
+                        {detailRow.resolverError}
+                      </p>
+                      {detailRow.path && (
+                        <p className="pr-path">
+                          Resolver checkout retained for diagnostics at:{" "}
+                          <FileLink
+                            target={{
+                              kind: "host",
+                              hostId: data.hostId,
+                              path: detailRow.path,
+                            }}
+                          >
+                            {detailRow.path}
+                          </FileLink>
+                        </p>
+                      )}
+                    </Callout>
+                    {detailRow.canRetry && (
+                      <div className="pr-actions">
+                        <Action
+                          variant="outline"
+                          disabled={!!busy || detailRow.running}
+                          onClick={() =>
+                            void run("retry", () => action(detailRow, "retry"))
+                          }
+                        >
+                          Retry optional resolution
+                        </Action>
+                      </div>
+                    )}
+                  </section>
+                )}
+                <BriefingCard
+                  briefing={details.briefing}
+                  busy={!!busy}
+                  onOpen={() => openBriefing(details.briefing)}
+                  onOpenThread={() => {
+                    if (details.briefing.threadId)
+                      navigate.toThread(details.briefing.threadId);
+                  }}
+                  onGenerate={() => {
+                    if (!detailRow.url) return;
+                    void run("brief", () =>
+                      rpc.call("briefingGenerate", { url: detailRow.url! }),
+                    );
+                  }}
+                />
+                {detailRow.reviewState !== "needs_attention" && (
+                  <section
+                    className="pr-frame"
+                    aria-labelledby="pr-summary-title"
+                  >
+                    <h2 id="pr-summary-title">Review summary</h2>
+                    <p>{details.summary}</p>
+                    {isOutdated(detailRow) && (
+                      <p className="text-destructive">
+                        This review describes an earlier PR head. Review latest
+                        changes before using these findings.
                       </p>
                     )}
-                    {details.feedback.comments.map((c, i) => (
-                      <article className="pr-feedback" key={i}>
-                        <div className="pr-heading">
-                          <h3>
-                            {c.author} · {c.location}
-                          </h3>
-                          {c.disposition && (
-                            <Badge>{label(c.disposition)}</Badge>
-                          )}
+                  </section>
+                )}
+                <section className="pr-frame" aria-label="Review details">
+                  <Tabs
+                    label="Review details"
+                    value={activeDetailTab}
+                    onChange={setDetailTab}
+                    tabs={[
+                      {
+                        id: "findings",
+                        label: "Findings",
+                        count: details.findings.length,
+                      },
+                      {
+                        id: "changes",
+                        label: "Changes",
+                        count: details.patches.length,
+                      },
+                      {
+                        id: "feedback",
+                        label: "Feedback",
+                        count: details.feedback.comments.length,
+                      },
+                      { id: "activity", label: "Resolver activity" },
+                      {
+                        id: "history",
+                        label: "History",
+                        count: attempts.length,
+                      },
+                    ]}
+                  >
+                    {activeDetailTab === "findings" &&
+                      (details.findings.length ? (
+                        <FindingsReport
+                          key={detailRow.id}
+                          findings={details.findings}
+                          hostId={data.hostId}
+                        />
+                      ) : (
+                        <Empty>No findings for this run.</Empty>
+                      ))}
+                    {activeDetailTab === "changes" && (
+                      <CodeChanges
+                        patches={details.patches}
+                        selectedFile={selectedFile}
+                        onSelectedFile={setSelectedFile}
+                      />
+                    )}
+                    {activeDetailTab === "feedback" &&
+                      feedbackPanel(
+                        details.feedback,
+                        "Read-only snapshot of unresolved review threads, review summaries, and PR conversation from people other than the PR author. On a PR you own, a manual resolver loop can disposition every item for truth, relevance, and scope; nothing is posted to GitHub.",
+                      )}
+                    {activeDetailTab === "activity" && (
+                      <section
+                        className="pr-panel"
+                        aria-labelledby="pr-activity-title"
+                      >
+                        <div className="pr-panel-heading">
+                          <h2 id="pr-activity-title">Resolver activity</h2>
+                          <Badge>{label(detailRow.resolverState)}</Badge>
                         </div>
-                        <Markdown content={c.body} />
-                        {c.reason && (
-                          <p className="text-sm text-muted-foreground">
-                            Resolver: {c.reason}
+                        <p className="pr-panel-caption">
+                          Read-only recent session activity. No shared writer is
+                          attached.
+                        </p>
+                        {details.activity.length ? (
+                          <div className="pr-activity">
+                            {details.activity.map((line, i) => (
+                              <pre key={i}>{line}</pre>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-muted-foreground">
+                            No resolver activity captured.
                           </p>
                         )}
-                      </article>
-                    ))}
-                  </>
-                )}
-              </section>
-            </>
-          )}
-        </main>
-      )}
-    </div>
+                      </section>
+                    )}
+                    {activeDetailTab === "history" && (
+                      <section
+                        className="pr-panel"
+                        aria-labelledby="pr-history-title"
+                      >
+                        <h2 id="pr-history-title" className="sr-only">
+                          Review history
+                        </h2>
+                        <p className="pr-panel-caption">
+                          Every retained attempt for this pull request, newest
+                          first. Results stay local.
+                        </p>
+                        <Timeline
+                          label="Review attempts"
+                          items={attempts.map((r) => ({
+                            key: r.id,
+                            time: when(r.updatedAt),
+                            title: attemptTitle(r),
+                            tone: attemptTone(r),
+                            current: r.id === detailRow.id,
+                            onOpen: () => open(r),
+                            detail: [
+                              r.model,
+                              `attempt ${r.attempt}`,
+                              short(r.head),
+                              r.submitted ? "submitted" : null,
+                              r.dismissed ? "dismissed" : null,
+                              r.superseded ? "historical" : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · "),
+                          }))}
+                        />
+                      </section>
+                    )}
+                  </Tabs>
+                </section>
+              </>
+            )}
+          </main>
+        )}
+      </div>
+    </TooltipProvider>
   );
 }
 function AttentionCount() {
@@ -2049,27 +2632,32 @@ function ConfigurationHelp() {
     <div className="space-y-3 text-sm">
       <p className="text-muted-foreground">
         Changes in the fields above are saved by BB and apply to the next
-        operation. Set <strong>Pair Review installation</strong> to <code>pair-review</code>{" "}
-        for the original installed app on the BB server PATH, or to an absolute
-        or <code>~/</code> directory for a compatible local fork. Choose the
-        native Pair Review provider used for analysis and a separately guarded
-        resolver provider. A legacy <code>~/.pair-review/pi-settings.json</code>{" "}
-        may still supply team and teammate metadata, but plugin settings control
-        providers and models. Provider and GitHub credentials remain in their
-        native stores; this plugin does not store secret settings.
+        operation. Set <strong>Pair Review installation</strong> to{" "}
+        <code>pair-review</code> for the original installed app on the BB server
+        PATH, or to an absolute or <code>~/</code> directory for a compatible
+        local fork. Choose the native Pair Review provider used for analysis and
+        a separately guarded resolver provider. A legacy{" "}
+        <code>~/.pair-review/pi-settings.json</code> may still supply team and
+        teammate metadata, but plugin settings control providers and models.
+        Provider and GitHub credentials remain in their native stores; this
+        plugin does not store secret settings.
       </p>
       <div>
         <Action
           variant="outline"
           disabled={busy}
           onClick={async () => {
-            if (!window.confirm("Reset every Pair Review setting to its default?"))
+            if (
+              !window.confirm("Reset every Pair Review setting to its default?")
+            )
               return;
             setBusy(true);
             setMessage("");
             try {
               await rpc.call("resetSettings");
-              setMessage("Defaults restored. Reopen Pair Review settings to refresh the fields above.");
+              setMessage(
+                "Defaults restored. Reopen Pair Review settings to refresh the fields above.",
+              );
             } catch (error) {
               setMessage(`Reset failed: ${String(error)}`);
             } finally {

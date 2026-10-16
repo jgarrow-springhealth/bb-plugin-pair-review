@@ -31,7 +31,7 @@ Plugin settings control provider and model selection. A legacy `~/.pair-review/p
 
 - BB 0.45 or newer with an enrolled server machine
 - Node.js 24+, Git, and authenticated GitHub CLI on that machine
-- Installed `@in-the-loop-labs/pair-review` command or compatible local fork
+- Installed [`@in-the-loop-labs/pair-review`](https://github.com/in-the-loop-labs/pair-review) or compatible local fork
 - The selected provider CLI/configuration and a supported model
 - For Claude/Codex resolver mode, a native CLI login; ambient API-key variables are deliberately not forwarded to the agent subprocess
 - Canonical HTTPS PRs on the configured hostname; cross-repository fork heads are unsupported

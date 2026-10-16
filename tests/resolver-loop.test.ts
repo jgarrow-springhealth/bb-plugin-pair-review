@@ -14,6 +14,7 @@ import { GitHub } from "../engine/data.ts";
 import { initial, privateDir } from "../engine/status.ts";
 import { Input } from "../engine/types.ts";
 import { Guard, verifyDispositions } from "../engine/resolver-guard.ts";
+import { cancelEntry } from "../engine/process.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -88,6 +89,128 @@ test("a normal Pair Review never starts resolution automatically", async () => {
 
   expect(resolve).not.toHaveBeenCalled();
   expect(status.entries[0].resolver.state).toBe("not_started");
+});
+
+test("stopping one PR run leaves the rest of its batch running", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(realpathSync(tmpdir()), "pair-review-entry-cancel-")),
+  );
+  roots.push(root);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  git("init", "-b", "main");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.com");
+  writeFileSync(join(repo, "value.ts"), "export const value = 1;\n");
+  git("add", "value.ts");
+  git("commit", "-m", "base");
+  const baseSha = git("rev-parse", "HEAD");
+  git("checkout", "-b", "feature-one");
+  writeFileSync(join(repo, "value.ts"), "export const value = 2;\n");
+  git("add", "value.ts");
+  git("commit", "-m", "first");
+  const firstHead = git("rev-parse", "HEAD");
+  git("checkout", "main");
+  git("checkout", "-b", "feature-two");
+  writeFileSync(join(repo, "value.ts"), "export const value = 3;\n");
+  git("add", "value.ts");
+  git("commit", "-m", "second");
+  const secondHead = git("rev-parse", "HEAD");
+
+  const dir = privateDir(join(root, "batch"));
+  for (const sub of ["reviews", "feedback", "actions"]) privateDir(join(dir, sub));
+  const input = Input.parse({
+    version: 1,
+    batchId: "entry-cancel",
+    createdAt: new Date().toISOString(),
+    login: "local-user",
+    settings: {},
+    targets: [
+      {
+        kind: "branch",
+        repoRoot: repo,
+        branch: "feature-one",
+        base: "main",
+        baseSha,
+        headSha: firstHead,
+        title: "first",
+      },
+      {
+        kind: "branch",
+        repoRoot: repo,
+        branch: "feature-two",
+        base: "main",
+        baseSha,
+        headSha: secondHead,
+        title: "second",
+      },
+    ],
+    origin: "test",
+  });
+  const status = initial(input);
+  let firstStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const analyze = vi.fn(
+    async (
+      _dir: string,
+      target: any,
+      _settings: any,
+      _prep: any,
+      _exec: any,
+      signal: AbortSignal,
+    ) => {
+      if (target.branch === "feature-one") {
+        firstStarted();
+        await new Promise<void>((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(Error("cancelled")), {
+            once: true,
+          }),
+        );
+      }
+      return {
+        state: "zero_findings" as const,
+        count: 0,
+        runId: `run-${target.branch}`,
+        file: join(dir, `${target.branch}.json`),
+        digest: "digest",
+        home: root,
+        database: join(root, "database.db"),
+        dbId: "db",
+        port: 7247,
+        uiPath: "/local/1",
+        model: "openai/gpt-5",
+      };
+    },
+  ) as any;
+
+  const execution = execute(
+    dir,
+    input,
+    status,
+    "run",
+    undefined,
+    new AbortController().signal,
+    {
+      exec: async (command, args, options) => {
+        const { run } = await import("../engine/process.ts");
+        return run(command, args, options);
+      },
+      github: new GitHub(),
+      analyze,
+      resolve: vi.fn(),
+    },
+  );
+  await started;
+  cancelEntry(dir, 0);
+  await execution;
+
+  expect(status.entries[0].review.state).toBe("cancelled");
+  expect(status.entries[1].review.state).toBe("zero_findings");
+  expect(analyze).toHaveBeenCalledTimes(2);
 });
 
 test("human comments become first-class resolver tasks, including summary feedback", () => {

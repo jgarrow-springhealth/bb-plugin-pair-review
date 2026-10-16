@@ -2,6 +2,7 @@
 import { afterEach, expect, test } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { fireEvent, waitFor, within } from "@testing-library/react";
+import { choose, shown } from "./picker";
 const pr = (number: number, repo: string, tag: string) => ({
   key: `github.com/example/${repo}#${number}`,
   url: `https://github.com/example/${repo}/pull/${number}`,
@@ -52,6 +53,12 @@ const snapshot = {
 };
 let slot: ReturnType<typeof renderSlot>;
 afterEach(() => slot?.lifecycle.unmount());
+/** The overview remembers its tab between visits, so every test picks one. */
+async function openTab(name: string) {
+  fireEvent.click(
+    await slot.findByRole("tab", { name: new RegExp(`^${name}`) }),
+  );
+}
 async function render(value: any = snapshot) {
   const app = await loadPluginApp(() => import("../app"));
   slot = renderSlot(
@@ -59,7 +66,8 @@ async function render(value: any = snapshot) {
     { subPath: "" },
     { rpc: { snapshot: () => value, refresh: () => value } },
   );
-  await slot.findByRole("heading", { name: "Change 1" });
+  await openTab("PR Queue");
+  await slot.findByRole("heading", { name: "PR Queue" });
   return slot;
 }
 test("separate request tabs intersect repository and text filters", async () => {
@@ -71,11 +79,11 @@ test("separate request tabs intersect repository and text filters", async () => 
   expect(within(firstCard).queryByText("feature/one-1")).toBeNull();
   expect(within(firstCard).queryByText("aaaaaaaaaa")).toBeNull();
   expect(slot.queryByRole("button", { name: /^Direct requests/ })).toBeNull();
-  fireEvent.change(
-    slot.getByRole("combobox", { name: "Filter by repository" }),
-    { target: { value: "example/one" } },
+  await choose("Filter by repository", "example/one");
+  expect(shown("Filter by repository")).toBe("example/one");
+  await waitFor(() =>
+    expect(slot.queryByRole("heading", { name: "Change 2" })).toBeNull(),
   );
-  expect(slot.queryByRole("heading", { name: "Change 2" })).toBeNull();
   expect(slot.getByRole("heading", { name: "Change 3" })).toBeTruthy();
   fireEvent.click(slot.getByRole("button", { name: /^Team requests/ }));
   expect(slot.queryByRole("heading", { name: "Change 1" })).toBeNull();
@@ -105,7 +113,7 @@ test("running PR replaces freshness with a spinner and stays visible even when c
     updatedAt: snapshot.updatedAt,
     attempt: 1,
     reviewState: "reviewing",
-    resolverState: "pending",
+    resolverState: "resolving",
     count: 0,
     attention: null,
     path: null,
@@ -121,17 +129,23 @@ test("running PR replaces freshness with a spinner and stays visible even when c
   await render({
     ...snapshot,
     queue: [{ ...queue[0], freshness: "current" }, ...queue.slice(1)],
-    rows: [row],
+    rows: [
+      row,
+      {
+        ...row,
+        id: "batch/1",
+        index: 1,
+        key: queue[1].key,
+        title: "Verification pass",
+        subject: "example/two #2",
+        url: queue[1].url,
+        head: "c".repeat(40),
+        resolverState: "reviewing",
+      },
+    ],
   });
-  const card = slot
-    .getByRole("heading", { name: "Change 1" })
-    .closest("article")!;
-  expect(
-    within(card)
-      .getByRole("status", { name: "Review in progress" })
-      .querySelector(".pr-spinner"),
-  ).toBeTruthy();
-  expect(within(card).queryByText("Review in progress")).toBeNull();
+  expect(slot.queryByRole("heading", { name: "Change 1" })).toBeNull();
+  await openTab("Running");
   const runningCard = slot
     .getByRole("heading", { name: "Active work" })
     .closest("article")!;
@@ -141,12 +155,18 @@ test("running PR replaces freshness with a spinner and stays visible even when c
       .getByRole("status", { name: "Review in progress" })
       .querySelector(".pr-spinner"),
   ).toBeTruthy();
-  expect(within(card).queryByText("Not reviewed")).toBeNull();
   expect(
-    within(card)
-      .getByRole("button", { name: "Review running" })
-      .hasAttribute("disabled"),
-  ).toBe(true);
+    within(runningCard)
+      .getByRole("status", { name: "Review in progress" })
+      .querySelector(".pr-spinner"),
+  ).toBeTruthy();
+  expect(within(runningCard).getByText("Resolver: running")).toBeTruthy();
+  const reviewingCard = slot
+    .getByRole("heading", { name: "Verification pass" })
+    .closest("article")!;
+  expect(
+    within(reviewingCard).getByText("Resolver: reviewing"),
+  ).toBeTruthy();
 });
 test("overview cards replace a full review error with a compact treatment", async () => {
   const error =
@@ -182,15 +202,63 @@ test("overview cards replace a full review error with a compact treatment", asyn
   };
   await render({ ...snapshot, rows: [row] });
   expect(slot.queryByText(error)).toBeNull();
-  for (const name of ["Change 1", "Failed work"]) {
-    const card = slot.getByRole("heading", { name }).closest("article")!;
-    expect(within(card).getByText("Review failed")).toBeTruthy();
-    expect(within(card).getByText("Review couldn’t finish")).toBeTruthy();
-    expect(
-      within(card).getByText(/Open Details to see the full error/),
-    ).toBeTruthy();
-  }
+  expect(slot.queryByRole("heading", { name: "Change 1" })).toBeNull();
+  await openTab("Needs attention");
+  expect(slot.queryByText(error)).toBeNull();
+  const card = slot
+    .getByRole("heading", { name: "Failed work" })
+    .closest("article")!;
+  expect(within(card).getByText("Review failed")).toBeTruthy();
+  expect(within(card).getByText("Review couldn’t finish")).toBeTruthy();
+  expect(
+    within(card).getByText(/Open Details to see the full error/),
+  ).toBeTruthy();
+  expect(within(card).queryByText("pending")).toBeNull();
 });
+test("reviewed PRs move out of the queue and clean decisions move into Final Review", async () => {
+  const reviewed = {
+    id: "reviewed/0",
+    batchId: "reviewed",
+    index: 0,
+    key: queue[0].key,
+    title: "Ready to submit",
+    subject: "example/one #1",
+    url: queue[0].url,
+    author: "author",
+    head: "a".repeat(40),
+    base: "b".repeat(40),
+    branch: "feature",
+    model: "openai/gpt-5",
+    updatedAt: snapshot.updatedAt,
+    attempt: 1,
+    reviewState: "zero_findings",
+    resolverState: "not_started",
+    count: 0,
+    attention: null,
+    path: null,
+    owned: false,
+    superseded: false,
+    dismissed: false,
+    running: false,
+    canRetry: false,
+    canAttempt: false,
+    canResolve: false,
+    canValidate: false,
+    publish: false,
+    submitted: false,
+    finalReview: true,
+    changes: null,
+  };
+  await render({ ...snapshot, rows: [reviewed] });
+
+  expect(slot.queryByRole("heading", { name: "Change 1" })).toBeNull();
+  await openTab("Final Review");
+  const card = slot
+    .getByRole("heading", { name: "Ready to submit" })
+    .closest("article")!;
+  expect(card.closest("section")?.id).toBe("pr-final");
+});
+
 test("superseded attempts do not display an in-flight badge", async () => {
   await render({
     ...snapshot,

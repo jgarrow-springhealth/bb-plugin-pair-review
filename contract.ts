@@ -163,6 +163,7 @@ export interface ReviewRow {
   publish: boolean;
   changes: ChangeStats | null;
   submitted: boolean;
+  finalReview: boolean;
 }
 export interface ChangeStats {
   files: number;
@@ -189,6 +190,8 @@ export interface Snapshot {
   queue: QueueItem[];
   warnings: string[];
   updatedAt: string;
+  /** When the PR queue was last discovered from GitHub; null until it has been. */
+  queueRefreshedAt?: string | null;
   health: {
     forkPath: string;
     version: string | null;
@@ -243,6 +246,7 @@ export interface Details {
     stale: boolean;
     error: string | null;
     updatedAt: number | null;
+    threadId: string | null;
   };
   activity: string[];
   feedback: {
@@ -296,6 +300,7 @@ const rowSchema = z.object({
   publish: z.boolean(),
   changes: changeStatsSchema.nullable(),
   submitted: z.boolean(),
+  finalReview: z.boolean(),
 });
 const queueSchema = z.object({
   key: z.string(),
@@ -317,6 +322,7 @@ export const snapshotSchema = z.object({
   queue: z.array(queueSchema).max(1000),
   warnings: z.array(z.string()),
   updatedAt: z.string(),
+  queueRefreshedAt: z.string().nullable().optional(),
   health: z.object({
     forkPath: z.string(),
     version: z.string().nullable(),
@@ -376,6 +382,7 @@ const detailsSchema = z.object({
     stale: z.boolean(),
     error: z.string().nullable(),
     updatedAt: z.number().int().nonnegative().nullable(),
+    threadId: z.string().nullable(),
   }),
   activity: z.array(z.string()),
   feedback: z.object({

@@ -26,6 +26,7 @@ const row = {
   owned: false,
   superseded: false,
   submitted: false,
+  finalReview: false,
   dismissed: false,
   running: false,
   canRetry: false,
@@ -51,6 +52,7 @@ const hostDetails = {
     stale: false,
     error: null,
     updatedAt: null,
+    threadId: null,
   },
   activity: [],
   feedback: { complete: false, error: null, comments: [] },
@@ -97,6 +99,7 @@ test("Pair Review works alone and omits the optional briefing", async () => {
     stale: false,
     error: null,
     updatedAt: null,
+    threadId: null,
   });
   await h.lifecycle.dispose();
 });

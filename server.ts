@@ -161,6 +161,7 @@ export default function plugin(bb: BbPluginApi) {
       stale: z.boolean(),
       error: z.string().nullable(),
       updatedAt: z.number().int().nonnegative().nullable(),
+      threadId: z.string().nullable().optional(),
     })
     .strict();
   const unavailableBriefing = () => ({
@@ -172,28 +173,31 @@ export default function plugin(bb: BbPluginApi) {
     stale: false,
     error: null,
     updatedAt: null,
+    threadId: null,
   });
   async function getBriefing(url: string | null, head?: string) {
     if (!url) return unavailableBriefing();
     try {
-      return await bb.sdk.plugins.callRpc({
+      const result = await bb.sdk.plugins.callRpc({
         pluginId: "pr-briefings",
         method: "briefing_get",
         input: { url, ...(head ? { head } : {}) } as any,
         outputSchema: briefingOutput,
       });
+      return { ...result, threadId: result.threadId ?? null };
     } catch {
       return unavailableBriefing();
     }
   }
   async function generateBriefing(url: string) {
     try {
-      return await bb.sdk.plugins.callRpc({
+      const result = await bb.sdk.plugins.callRpc({
         pluginId: "pr-briefings",
         method: "briefing_generate",
         input: { url },
         outputSchema: briefingOutput,
       });
+      return { ...result, threadId: result.threadId ?? null };
     } catch {
       throw Error(
         "Install and enable the PR Briefings plugin to generate this briefing.",

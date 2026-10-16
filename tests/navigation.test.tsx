@@ -49,7 +49,7 @@ test("registers a dedicated Pair Review navigation page", async () => {
   });
   expect(app.experimentalSidebarNavigations).toHaveLength(0);
 });
-test("shows a GitHub origin link, no batch name or filesystem label, and a native disclosure", async () => {
+test("shows a GitHub origin link, a header start bar, and the local-branch dialog", async () => {
   const app = await loadPluginApp(() => import("../app"));
   slot = renderSlot(
     app.navPanels[0],
@@ -62,31 +62,131 @@ test("shows a GitHub origin link, no batch name or filesystem label, and a nativ
   );
   expect(slot.queryByLabelText("Optional batch name")).toBeNull();
   expect(slot.queryByText(/\/Users\/example/)).toBeNull();
+  // Starting a review lives in the header, not in its own section, so the
+  // summary sits directly above the lists it filters.
+  const startBar = slot.getByRole("form", { name: "Start a Pair Review" });
+  expect(startBar.closest("header")).toBeTruthy();
   expect(
-    slot.getByText("Local checkout or branch").closest("summary")?.parentElement
-      ?.tagName,
-  ).toBe("DETAILS");
-  const controls = slot.getByRole("heading", {
-    name: "Filter and batch PR queue",
-  });
-  const running = slot.getByRole("heading", { name: "Running" });
-  const recent = slot.getByRole("heading", { name: "Recent reviews" });
-  const queue = slot.getByRole("heading", { name: "Your PR queue" });
-  expect(
-    controls.compareDocumentPosition(running) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
+    within(startBar).getByLabelText("GitHub pull request URLs"),
   ).toBeTruthy();
   expect(
-    running.compareDocumentPosition(recent) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-  expect(
-    recent.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-  expect(
-    slot
+    within(startBar)
       .getByRole("button", { name: "Start Pair Review" })
       .hasAttribute("disabled"),
   ).toBe(true);
+  expect(slot.queryByRole("heading", { name: "Start a Pair Review" })).toBeNull();
+  const summary = slot.getByRole("region", { name: "Review summary" });
+  const lists = slot.getByRole("region", { name: "Pair Review lists" });
+  expect(
+    startBar.compareDocumentPosition(summary) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    summary.compareDocumentPosition(lists) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  // Local reviews open in a dialog that keeps the field guidance.
+  expect(slot.queryByLabelText("Local checkout path")).toBeNull();
+  fireEvent.click(slot.getByRole("button", { name: "Review a local branch…" }));
+  const dialog = await slot.findByRole("dialog", {
+    name: "Review a local branch",
+  });
+  expect(
+    within(dialog)
+      .getByLabelText("Local checkout path")
+      .getAttribute("placeholder"),
+  ).toBe("/Users/you/Code/repository");
+  expect(
+    within(dialog).getByText(/Full path to the local Git checkout/),
+  ).toBeTruthy();
+  expect(within(dialog).getByText(/Compare from this ref/)).toBeTruthy();
+  expect(within(dialog).getByText(/Blank uses/)).toBeTruthy();
+  expect(
+    within(dialog)
+      .getByRole("button", { name: "Confirm local review" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(slot!.queryByRole("dialog")).toBeNull());
+
+  const tabs = within(
+    slot.getByRole("tablist", { name: "Pair Review lists" }),
+  ).getAllByRole("tab");
+  expect(tabs.map((tab) => tab.textContent?.replace(/\d+$/, ""))).toEqual([
+    "PR Queue",
+    "Running",
+    "Needs attention",
+    "Final Review",
+    "Recent reviews",
+    "Dismissed",
+  ]);
+  fireEvent.click(tabs[0]!);
+  expect(tabs[0]!.getAttribute("aria-selected")).toBe("true");
+  const queue = slot.getByRole("heading", { name: "PR Queue" });
+  const controls = slot.getByRole("group", { name: "Request type" });
+  expect(
+    queue.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+test("a local branch review previews, confirms, and starts from the dialog", async () => {
+  const app = await loadPluginApp(() => import("../app"));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const preview = vi.fn(() => ({
+    base: "origin/main",
+    baseSha: "b".repeat(40),
+    head: "c".repeat(40),
+  }));
+  const start = vi.fn(() => ({ batchId: "local-batch" }));
+  slot = renderSlot(
+    app.navPanels[0],
+    { subPath: "" },
+    {
+      rpc: {
+        snapshot: () => snapshot,
+        refresh: () => snapshot,
+        preview,
+        start,
+      },
+    },
+  );
+  await slot.findByRole("link", { name: "example/pair-review" });
+  fireEvent.click(slot.getByRole("button", { name: "Review a local branch…" }));
+  const dialog = await slot.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("Local checkout path"), {
+    target: { value: "/work/project" },
+  });
+  fireEvent.change(within(dialog).getByLabelText("Local branch"), {
+    target: { value: "feature/local" },
+  });
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Confirm local review" }),
+  );
+  await waitFor(() =>
+    expect(start).toHaveBeenCalledWith({
+      urls: [],
+      local: {
+        path: "/work/project",
+        branch: "feature/local",
+        expectedHead: "c".repeat(40),
+        expectedBase: "b".repeat(40),
+      },
+    }),
+  );
+  expect(preview).toHaveBeenCalledWith({
+    urls: [],
+    local: { path: "/work/project", branch: "feature/local" },
+  });
+  expect(confirm).toHaveBeenCalledWith(
+    expect.stringContaining("Publication is disabled"),
+  );
+  await waitFor(() => expect(slot!.queryByRole("dialog")).toBeNull());
+  expect(slot.inspection.navigateCalls).toContainEqual(
+    expect.objectContaining({
+      method: "toPluginPanel",
+      options: { subPath: "local-batch/0" },
+    }),
+  );
+  confirm.mockRestore();
 });
 test("starts without a name and navigates to review details", async () => {
   const app = await loadPluginApp(() => import("../app"));

@@ -1,10 +1,27 @@
 import { expect, test } from "vitest";
-import { clean, viewerIdentityError } from "../service";
+import {
+  clean,
+  readyForFinalReview,
+  viewerIdentityError,
+} from "../service";
 test("saved errors render without ANSI coloring or terminal controls", () => {
   const error =
     "Analysis failed: \u001b[36m[03:50:42]\u001b[0m \u001b[1m\u001b[33m[AI ⚠]\u001b[0m gh auth token\u0007";
   expect(clean(error)).toBe("Analysis failed: [03:50:42] [AI ⚠] gh auth token");
 });
+test("final review requires no findings or a decision on every finding", () => {
+  expect(readyForFinalReview("zero_findings", 0)).toBe(true);
+  expect(
+    readyForFinalReview("findings", 2, { total: 2, unresolved: 0 }),
+  ).toBe(true);
+  expect(
+    readyForFinalReview("findings", 2, { total: 2, unresolved: 1 }),
+  ).toBe(false);
+  expect(
+    readyForFinalReview("findings", 2, { total: 1, unresolved: 0 }),
+  ).toBe(false);
+});
+
 test("viewer identity errors name version and database conflicts", () => {
   expect(
     viewerIdentityError(

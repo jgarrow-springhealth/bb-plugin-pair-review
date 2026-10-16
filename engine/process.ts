@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   rmSync,
+  readdirSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -168,6 +169,14 @@ const same = (a: unknown, b: unknown) =>
 export async function launch(dir: string, mode = "run", entry?: number) {
   if (process.platform === "win32")
     throw Error("Detached process-group safety requires macOS or Linux");
+  const actions = join(dir, "actions");
+  if (existsSync(actions)) {
+    for (const name of readdirSync(actions)) {
+      const match = name.match(/^cancel-entry-(\d+)\.json$/);
+      if (match && (entry === undefined || Number(match[1]) === entry))
+        rmSync(join(actions, name));
+    }
+  }
   const token = randomBytes(24).toString("hex");
   const args = [
     join(import.meta.dirname, "coordinator.mjs"),
@@ -194,6 +203,13 @@ export async function launch(dir: string, mode = "run", entry?: number) {
   });
   child.unref();
   return token;
+}
+export function cancelEntry(dir: string, index: number) {
+  if (!Number.isInteger(index) || index < 0) throw Error("Invalid review index");
+  atomicJson(join(dir, "actions", `cancel-entry-${index}.json`), {
+    index,
+    at: now(),
+  });
 }
 export async function cancel(
   dir: string,

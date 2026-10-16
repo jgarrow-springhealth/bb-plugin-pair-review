@@ -2,6 +2,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { fireEvent, waitFor, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { choose, shown } from "./picker";
 // Reproduce the live host's fresh RPC object identity on each hook render.
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
   const actual =
@@ -32,6 +33,7 @@ const unavailableBriefing = {
   stale: false,
   error: null,
   updatedAt: null,
+  threadId: null,
 };
 const missingBriefing = {
   available: true,
@@ -42,6 +44,7 @@ const missingBriefing = {
   stale: false,
   error: null,
   updatedAt: null,
+  threadId: null,
 };
 const readyBriefing = {
   available: true,
@@ -52,6 +55,7 @@ const readyBriefing = {
   stale: false,
   error: null,
   updatedAt: 1,
+  threadId: "briefing-thread",
 };
 const currentPatches = [
   {
@@ -100,6 +104,12 @@ afterEach(() => {
   slot = undefined;
   vi.restoreAllMocks();
 });
+/** Overview and detail lists sit behind tabs; select one by its label. */
+async function openTab(name: string) {
+  const tab = await slot!.findByRole("tab", { name: new RegExp(`^${name}`) });
+  fireEvent.click(tab);
+  return tab;
+}
 test("every queue card has Details that navigates without starting a review", async () => {
   const app = await loadPluginApp(() => import("../app"));
   const start = vi.fn();
@@ -108,6 +118,7 @@ test("every queue card has Details that navigates without starting a review", as
     { subPath: "" },
     { rpc: { snapshot: () => snapshot, refresh: () => snapshot, start } },
   );
+  await openTab("PR Queue");
   const title = await slot.findByRole("heading", { name: pr.title });
   expect(
     within(title.closest("article")!).getByLabelText(
@@ -136,6 +147,7 @@ test("Review latest changes starts the engine without navigating away from the q
     { subPath: "" },
     { rpc: { snapshot: () => snapshot, refresh: () => snapshot, start } },
   );
+  await openTab("PR Queue");
   const title = await slot.findByRole("heading", { name: pr.title });
   fireEvent.click(
     within(title.closest("article")!).getByRole("button", {
@@ -195,6 +207,7 @@ test("needs-attention runs can be dismissed without deleting evidence", async ()
     },
   );
 
+  await openTab("Needs attention");
   const card = (await slot.findByText("Review couldn’t finish")).closest(
     "article",
   )!;
@@ -262,19 +275,13 @@ test("dismissed runs stay out of needs-attention and can be restored separately"
     },
   );
 
-  const attention = (
-    await slot.findByRole("heading", {
-      name: "Needs attention",
-    })
-  ).closest("button")!;
+  const attention = await openTab("Needs attention");
   expect(within(attention).getByText("0")).toBeTruthy();
+  expect(slot.getByText("Nothing needs attention.")).toBeTruthy();
   expect(slot.queryByRole("heading", { name: pr.title })).toBeNull();
 
-  fireEvent.click(
-    (await slot.findByRole("heading", { name: "Dismissed runs" })).closest(
-      "button",
-    )!,
-  );
+  await openTab("Dismissed");
+  await slot.findByRole("heading", { name: "Dismissed runs" });
   const title = await slot.findByRole("heading", { name: pr.title });
   const card = title.closest("article")!;
   expect(within(card).getByText("Dismissed")).toBeTruthy();
@@ -333,6 +340,7 @@ test("retained reviews are labeled Outdated when GitHub has a newer head", async
     { subPath: "" },
     { rpc: { snapshot: () => page, refresh: () => page } },
   );
+  await openTab("Recent reviews");
   const title = await slot.findByRole("heading", {
     name: "Review of an earlier head",
   });
@@ -385,6 +393,7 @@ test("submitted GitHub reviews are omitted from Recent reviews", async () => {
       },
     },
   );
+  await openTab("Recent reviews");
   await slot.findByRole("heading", { name: "Recent reviews" });
   expect(
     slot.queryByRole("heading", { name: "Already submitted review" }),
@@ -612,6 +621,8 @@ test("starting from details immediately follows the new live review without navi
   await waitFor(() => expect(details).toHaveBeenCalledWith(next));
   expect(await slot.findByText("Live review accepted")).toBeTruthy();
   expect(slot.getByLabelText("Review in progress")).toBeTruthy();
+  expect(slot.getByRole("button", { name: "Stop review" })).toBeTruthy();
+  expect(slot.queryByRole("button", { name: "Cancel batch" })).toBeNull();
   expect(slot.inspection.navigateCalls).toHaveLength(0);
 });
 
@@ -872,7 +883,7 @@ test("a resolver failure does not relabel a completed review as failed", async (
   expect(
     slot.getByRole("button", { name: "Retry optional resolution" }),
   ).toBeTruthy();
-  fireEvent.click(slot.getByRole("button", { name: "Show feedback" }));
+  await openTab("Feedback");
   expect(
     slot.getByText("No unresolved human feedback was found."),
   ).toBeTruthy();
@@ -961,9 +972,22 @@ test("a PR detail route reuses existing saved review details, without analysis",
     },
   );
   await slot.findByText("Previously saved verified summary");
-  expect((slot.getByLabelText("Changed file") as HTMLSelectElement).value).toBe(
-    "0",
+  // A retained review opens on its findings; the diff is one tab away.
+  expect(
+    (await openTab("Findings")).getAttribute("aria-selected"),
+  ).toBe("true");
+  expect(
+    slot.getByText("src/features/reviews/very-specific-review-file.ts"),
+  ).toBeTruthy();
+  expect(slot.getByText(":42")).toBeTruthy();
+  fireEvent.click(
+    slot.getByRole("button", { name: /Keep the review state current/ }),
   );
+  expect(slot.getByRole("heading", { name: "Comment" })).toBeTruthy();
+  expect(slot.getByRole("heading", { name: "Suggestion" })).toBeTruthy();
+  expect(slot.getByText("Refresh the state before deciding.")).toBeTruthy();
+  await openTab("Changes");
+  expect(shown("Changed file")).toBe("src/one.ts");
   const briefingHeading = slot.getByRole("heading", { name: "PR briefing" });
   const summaryHeading = slot.getByRole("heading", {
     name: "Review summary",
@@ -985,9 +1009,8 @@ test("a PR detail route reuses existing saved review details, without analysis",
   expect(
     codeChanges?.querySelector('[data-file-path="src/two.ts"]'),
   ).toBeNull();
-  fireEvent.change(slot.getByLabelText("Changed file"), {
-    target: { value: "1" },
-  });
+  await choose("Changed file", "src/two.ts");
+  expect(shown("Changed file")).toBe("src/two.ts");
   expect(
     codeChanges?.querySelector('[data-file-path="src/two.ts"]'),
   ).toBeTruthy();
@@ -997,13 +1020,7 @@ test("a PR detail route reuses existing saved review details, without analysis",
   expect(slot.getByRole("button", { name: "Open Pair Review" })).toBeTruthy();
   expect(slot.queryByRole("button", { name: "Pair Review fork" })).toBeNull();
   expect(slot.getByText("Outdated")).toBeTruthy();
-  expect(
-    slot.getByText("src/features/reviews/very-specific-review-file.ts:42"),
-  ).toBeTruthy();
-  expect(slot.getByRole("heading", { name: "Comment" })).toBeTruthy();
-  expect(slot.getByRole("heading", { name: "Suggestion" })).toBeTruthy();
-  expect(slot.getByText("Refresh the state before deciding.")).toBeTruthy();
-  fireEvent.click(slot.getByRole("button", { name: "Show feedback" }));
+  await openTab("Feedback");
   expect(slot.getByText("Not captured")).toBeTruthy();
   const refreshCalls = refresh.mock.calls.length;
   fireEvent.click(slot.getByRole("button", { name: "Refresh from GitHub" }));
@@ -1021,6 +1038,13 @@ test("a PR detail route reuses existing saved review details, without analysis",
       },
       location: null,
     },
+  });
+  fireEvent.click(
+    slot.getByRole("button", { name: "Open briefing thread" }),
+  );
+  expect(slot.inspection.navigateCalls).toContainEqual({
+    method: "toThread",
+    threadId: "briefing-thread",
   });
   await new Promise((r) => setTimeout(r, 100));
   expect(

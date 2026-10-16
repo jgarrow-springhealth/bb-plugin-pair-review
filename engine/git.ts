@@ -22,7 +22,12 @@ export function gitEnv(): NodeJS.ProcessEnv {
     GIT_CONFIG_VALUE_3: "!gh auth git-credential",
   };
 }
-export async function git(cwd: string, args: string[], exec: Run = run) {
+export async function git(
+  cwd: string,
+  args: string[],
+  exec: Run = run,
+  signal?: AbortSignal,
+) {
   return exec(
     "git",
     [
@@ -38,7 +43,7 @@ export async function git(cwd: string, args: string[], exec: Run = run) {
       cwd,
       ...args,
     ],
-    { env: gitEnv() },
+    { env: gitEnv(), signal },
   );
 }
 export const remoteFor = (t: Target) =>
@@ -51,18 +56,19 @@ export async function retained(
   t: Target,
   exec: Run = run,
   fixtureRemote?: string,
+  signal?: AbortSignal,
 ) {
   safePath(dir);
   privateDir(dir);
   const bare = join(dir, "repo.git"),
     checkout = join(dir, "analysis");
-  await git(dir, ["init", "--bare", bare], exec);
-  await git(bare, ["config", "core.hooksPath", "/dev/null"], exec);
-  await git(bare, ["config", "core.fsmonitor", "false"], exec);
+  await git(dir, ["init", "--bare", bare], exec, signal);
+  await git(bare, ["config", "core.hooksPath", "/dev/null"], exec, signal);
+  await git(bare, ["config", "core.fsmonitor", "false"], exec, signal);
   if (t.kind === "pr") {
     const remote = fixtureRemote ?? remoteFor(t)!;
     if (!fixtureRemote) validateRemote(remote, t);
-    await git(bare, ["remote", "add", "origin", remote], exec);
+    await git(bare, ["remote", "add", "origin", remote], exec, signal);
     await git(
       bare,
       [
@@ -74,6 +80,7 @@ export async function retained(
         t.headSha,
       ],
       exec,
+      signal,
     );
   } else {
     const origin = realpathSync(t.repoRoot);
@@ -89,19 +96,39 @@ export async function retained(
         t.headSha,
       ],
       exec,
+      signal,
     );
   }
   for (const s of [t.baseSha, t.headSha]) {
     Sha.parse(s);
-    if ((await git(bare, ["cat-file", "-t", s], exec)).trim() !== "commit")
+    if (
+      (await git(bare, ["cat-file", "-t", s], exec, signal)).trim() !==
+      "commit"
+    )
       throw Error("Ref is not a commit");
   }
-  await git(bare, ["update-ref", "refs/heads/reviewed", t.headSha], exec);
-  await git(bare, ["symbolic-ref", "HEAD", "refs/heads/reviewed"], exec);
-  await git(bare, ["worktree", "add", "--detach", checkout, t.headSha], exec);
+  await git(
+    bare,
+    ["update-ref", "refs/heads/reviewed", t.headSha],
+    exec,
+    signal,
+  );
+  await git(
+    bare,
+    ["symbolic-ref", "HEAD", "refs/heads/reviewed"],
+    exec,
+    signal,
+  );
+  await git(
+    bare,
+    ["worktree", "add", "--detach", checkout, t.headSha],
+    exec,
+    signal,
+  );
   if (
-    (await git(checkout, ["rev-parse", "HEAD"], exec)).trim() !== t.headSha ||
-    (await git(checkout, ["status", "--porcelain"], exec)).trim()
+    (await git(checkout, ["rev-parse", "HEAD"], exec, signal)).trim() !==
+      t.headSha ||
+    (await git(checkout, ["status", "--porcelain"], exec, signal)).trim()
   )
     throw Error("Retained checkout verification failed");
   // Native PR mode uses a merge-base diff. Save both exact endpoint and native scoped diffs.
@@ -119,11 +146,13 @@ export async function retained(
     bare,
     ["diff", ...flags, `${t.baseSha}...${t.headSha}`],
     exec,
+    signal,
   );
   const endpoints = await git(
     bare,
     ["diff", ...flags, t.baseSha, t.headSha],
     exec,
+    signal,
   );
   text(join(dir, "diff.patch"), diff);
   text(join(dir, "endpoints.patch"), endpoints);
@@ -134,13 +163,19 @@ export async function resolverCheckout(
   path: string,
   sha: string,
   exec: Run = run,
+  signal?: AbortSignal,
 ) {
   safePath(path);
   Sha.parse(sha);
-  await git(bare, ["worktree", "add", "--detach", path, sha], exec);
+  await git(
+    bare,
+    ["worktree", "add", "--detach", path, sha],
+    exec,
+    signal,
+  );
   if (
-    (await git(path, ["rev-parse", "HEAD"], exec)).trim() !== sha ||
-    (await git(path, ["status", "--porcelain"], exec)).trim()
+    (await git(path, ["rev-parse", "HEAD"], exec, signal)).trim() !== sha ||
+    (await git(path, ["status", "--porcelain"], exec, signal)).trim()
   )
     throw Error("Resolver checkout verification failed");
   return path;

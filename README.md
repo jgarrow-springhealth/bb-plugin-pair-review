@@ -1,6 +1,6 @@
 # Pair Review for BB
 
-Pair Review brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed [Pair Review app](https://github.com/in-the-loop-labs/pair-review) or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
+[Pair Review](https://github.com/in-the-loop-labs/pair-review) brings a local-first GitHub pull-request review workflow into BB. It discovers PRs that need your attention, runs either the original installed Pair Review app or a compatible local fork, preserves review evidence, and keeps resolver and publication actions behind separate confirmations.
 
 ## What you can do
 
@@ -89,20 +89,102 @@ Plugin settings choose the review and resolver providers and models. When presen
 
 Repository content, comments, findings, diffs, and tool output are treated as untrusted input. The resolver has no shell, network, repository credentials, or GitHub-write tool.
 
-## Development and verification
+## Contributing
+
+Contributions are welcome. Bug reports and pull requests go to
+[jgarrow-springhealth/bb-plugin-pair-review](https://github.com/jgarrow-springhealth/bb-plugin-pair-review).
+For larger changes, open an issue first so the approach can be agreed before
+you invest in it.
+
+### Set up a checkout
+
+You need the [prerequisites](#prerequisites) above plus npm. Then:
 
 ```sh
+git clone https://github.com/jgarrow-springhealth/bb-plugin-pair-review.git
+cd bb-plugin-pair-review
 npm ci --ignore-scripts
 node scripts/link-host.mjs   # contributor test setup; not an end-user step
+bb plugin install .          # run BB's copy of the plugin from this checkout
+```
+
+`link-host.mjs` links a development checkout to a locally installed `@earendil-works/pi-coding-agent` package so tests can resolve the optional Pi resolver SDK. By default it looks under the global npm root; contributors can instead set `PI_HOST_ROOT` to that package directory. Clean GitHub plugin builds and normal Claude/Codex use do not run the script.
+
+`bb plugin install .` registers the directory in place. Confirm BB is running your checkout, not a Git release:
+
+```sh
+bb plugin source pair-review   # expect: path:/…/bb-plugin-pair-review
+```
+
+### Get your changes into BB
+
+BB does not watch a path install by default. What you need to do depends on what you changed:
+
+| You changed | To pick it up | Why |
+| --- | --- | --- |
+| `app.tsx`, `app.css`, `ui/`, `components/`, or a module the page imports at runtime (`queue.ts`, `time.ts`) | `bb plugin build . && bb plugin reload pair-review` | The page is compiled into `dist/app.js` and `dist/app.css`. |
+| `host.ts` | `bb plugin build . && bb plugin reload pair-review` | The host worker is bundled into `dist/host.js`. |
+| `server.ts`, `contract.ts`, or `sidebar-rows.ts` | `bb plugin reload pair-review` | Path installs load the server entry as TypeScript when the plugin loads, and the server validates RPC data with `contract.ts`. |
+| `service.ts`, `engine/`, `bridge.mjs` | Nothing; the next request uses it | Each request starts a fresh `node bridge.mjs` from your checkout. |
+
+When in doubt, build and reload. For active work, run the watch loop instead. It rebuilds and reloads on every save, and writes an unminified `dist/app.js` for readable stack traces:
+
+```sh
+bb plugin dev .
+```
+
+Then:
+
+- **See the update:** open or refresh the **Pair Review** page; `bb plugin list` should show `pair-review` as `running`.
+- **If the page didn't change:** run `bb plugin logs pair-review` to see why the load or build failed.
+- **Before reloading:** check `bb pair-review status` and prefer reloading when no review is running.
+- **Be careful with service and engine edits:** because they go live on the next request, a half-finished edit can affect reviews you start from BB in the meantime.
+
+### Verify a change
+
+```sh
 npm run typecheck
 npm test
 npm run test:pair-review-compat  # set PAIR_REVIEW_EXECUTABLE for a specific build
-npm run build
+npm run build                    # same as `bb plugin build`
 ```
 
-`link-host.mjs` links a development checkout to a locally installed `@earendil-works/pi-coding-agent` package so tests can resolve the optional Pi resolver SDK. By default it looks under the global npm root; contributors can instead set `PI_HOST_ROOT` to that package directory. This is contributor test setup only: clean GitHub plugin builds and normal Claude/Codex use do not run the script.
+Run `typecheck`, `test`, and `build` before every pull request. The compatibility suite (`compat/`) requires an actual Pair Review executable and is separate from the offline unit and UI tests; run it when you change the engine, adapter detection, or anything that talks to Pair Review. Offline tests do not prove provider authentication, live GitHub access, native app startup, or guarded publication, so describe any manual checks you ran in the pull request.
 
-The compatibility suite requires an actual Pair Review executable and is separate from offline unit and UI tests. Offline tests do not prove provider authentication, live GitHub access, native app startup, or guarded publication.
+### Project layout
+
+| Path | What lives there |
+| --- | --- |
+| `app.tsx`, `app.css` | The **Pair Review** page: overview, details, dialogs, settings notes. |
+| `ui/kit.tsx`, `ui/findings.tsx` | Display components: metrics, tabs, steps, timeline, the findings report. |
+| `ui/controls.tsx` | Shared controls: icon buttons with tooltips (`IconAction`, `Hint`) and the styled dropdown (`Picker`). |
+| `components/ui/` | BB registry primitives (button, dialog, select, tooltip, …). Update them from BB's registry rather than editing them by hand. |
+| `server.ts` | Plugin backend: RPC handlers, settings, realtime updates, CLI command. |
+| `contract.ts` | Shared RPC and data contracts used by the page, server, and host. |
+| `host.ts`, `bridge.mjs`, `service.ts` | Full-trust host worker and the bridge that runs each request through `service.ts`. |
+| `engine/` | Pair Review execution, Git checkouts, the resolver loop, and guards. |
+| `tests/` | Offline unit and UI tests (Vitest + Testing Library). |
+| `compat/` | Compatibility tests against a real Pair Review installation. |
+
+### Conventions
+
+- **Safety boundaries are features.** Opening Details never starts analysis, review never starts resolution, and publication keeps its separate confirmations and checks. Changes that touch these paths need tests that prove the boundary still holds.
+- **Treat repository content as untrusted.** Comments, findings, diffs, and tool output are data, never instructions, in code and in prompts.
+- **Styling uses BB's tokens.** `bb plugin build` compiles Tailwind against BB's theme, so prefer utilities and semantic colors (`text-muted-foreground`, `bg-surface-recessed`, `text-warning-text`) over hard-coded colors. Page styles in `app.css` stay inside `@layer components` so utilities can override them. Responsive rules use the `pr-page` container query, because BB's sidebar and panels can leave a wide window with a narrow pane.
+- **Icons must be BB icon names**, such as `AlertTriangle`, `RotateCcw`, or `ExternalLink`. Unknown names silently render as BB's Zap fallback.
+- **Icon-only buttons need a label.** Use `IconAction`, which sets the accessible name and shows it as a tooltip. The shared `Button` deliberately omits native `title` tooltips.
+- **Use `Picker` instead of a native `<select>`.** In tests, drive it with `choose()` and read it with `shown()` from `tests/picker.ts`.
+- **Overview tests pick a tab first.** The overview remembers its tab between visits, so each test selects the tab it needs instead of relying on the default.
+- **Credit adapted code.** If you adapt third-party code, keep its license header, add it to [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and include its license under `licenses/`.
+- **Screenshots must be sanitized.** Only release screenshots with no private repositories, counts, or credentials belong under `docs/screenshots/`.
+
+### Pull request checklist
+
+- [ ] `npm run typecheck`, `npm test`, and `npm run build` pass.
+- [ ] New behavior has tests; UI changes were checked in BB after a build and reload.
+- [ ] Safety boundaries (no analysis on Details, no resolution on review, guarded publication) are unchanged or covered by new tests.
+- [ ] User-facing changes are reflected in this README and `PLUGIN_OVERVIEW.md`.
+- [ ] Any adapted third-party code is credited in `THIRD_PARTY_NOTICES.md`.
 
 ## Screenshots
 

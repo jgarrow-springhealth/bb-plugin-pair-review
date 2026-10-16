@@ -66,6 +66,29 @@ export type ResolverLoopOptions = {
   maxRounds: number;
 };
 
+function entryCancellationSignal(
+  dir: string,
+  index: number,
+  parent: AbortSignal,
+) {
+  const controller = new AbortController();
+  const path = join(dir, "actions", `cancel-entry-${index}.json`);
+  const check = () => {
+    if (parent.aborted || existsSync(path)) controller.abort();
+  };
+  const timer = setInterval(check, 200);
+  timer.unref();
+  parent.addEventListener("abort", check, { once: true });
+  check();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearInterval(timer);
+      parent.removeEventListener("abort", check);
+    },
+  };
+}
+
 export function resolverTasks(findings: any[], feedback?: Feedback) {
   const reviewTasks = findings.map((finding, originalFindingIndex) => ({
     ...finding,
@@ -164,7 +187,15 @@ export async function execute(
   try {
     if (mode !== "retry")
       await pool(entries, input.settings.preparationConcurrency, async (e) => {
-        if (signal.aborted) return;
+        const entryIndex = status.entries.indexOf(e);
+        const cancellation = entryCancellationSignal(dir, entryIndex, signal);
+        const runSignal = cancellation.signal;
+        if (runSignal.aborted) {
+          e.review.state = "cancelled";
+          cancellation.dispose();
+          save();
+          return;
+        }
         const path = privateDir(
           join(dir, "reviews", `${hash(e.key).slice(0, 16)}-${e.attempt}`),
         );
@@ -172,13 +203,16 @@ export async function execute(
         save();
         try {
           const current = await fresh(e.target);
+          runSignal.throwIfAborted();
           unchanged(e.target, current);
           const prep = await retained(
             path,
             e.target,
             deps.exec,
             deps.fixtureRemote,
+            runSignal,
           );
+          runSignal.throwIfAborted();
           e.review.checkout = prep.checkout;
           prepared.set(e, prep);
           if (input.settings.feedback && e.target.kind === "pr") {
@@ -197,7 +231,10 @@ export async function execute(
             }
           }
         } catch (err) {
-          attention(e, String(err));
+          if (runSignal.aborted) e.review.state = "cancelled";
+          else attention(e, String(err));
+        } finally {
+          cancellation.dispose();
         }
         save();
       });
@@ -205,10 +242,16 @@ export async function execute(
     if (mode !== "retry")
       for (const e of entries) {
         if (signal.aborted) break;
-        if (e.attention) continue;
-        const prep = prepared.get(e)!;
+        if (e.attention || e.review.state === "cancelled") continue;
+        const entryIndex = status.entries.indexOf(e);
+        const cancellation = entryCancellationSignal(dir, entryIndex, signal);
+        const runSignal = cancellation.signal;
+        const prep = prepared.get(e);
         try {
+          runSignal.throwIfAborted();
+          if (!prep) throw Error("Prepared review checkout is unavailable");
           const current = await fresh(e.target);
+          runSignal.throwIfAborted();
           try {
             unchanged(e.target, current);
           } catch (err) {
@@ -224,19 +267,23 @@ export async function execute(
             input.settings,
             prep,
             deps.exec,
-            signal,
+            runSignal,
           );
+          runSignal.throwIfAborted();
           e.review = { ...e.review, ...result, completedAt: now() };
           save();
           const after = await fresh(e.target);
+          runSignal.throwIfAborted();
           try {
             unchanged(e.target, after);
           } catch (err) {
             attention(e, `After analysis: ${err}`, after);
           }
         } catch (err) {
-          if (signal.aborted) e.review.state = "cancelled";
+          if (runSignal.aborted) e.review.state = "cancelled";
           else attention(e, `Analysis output unverifiable or failed: ${err}`);
+        } finally {
+          cancellation.dispose();
         }
         save();
       }
@@ -290,6 +337,8 @@ export async function executeResolverLoop(
     throw Error(
       "Resolver loops are limited to local branches and PRs you authored",
     );
+  const cancellation = entryCancellationSignal(dir, index, signal);
+  const runSignal = cancellation.signal;
 
   const save = () => {
     status.updatedAt = now();
@@ -376,6 +425,7 @@ export async function executeResolverLoop(
         e.target,
         deps.exec,
         deps.fixtureRemote,
+        runSignal,
       );
       bare = prep.bare;
       if (!reviewComplete(e))
@@ -390,7 +440,13 @@ export async function executeResolverLoop(
       ),
     );
     const checkout = join(resolverDir, "checkout");
-    await resolverCheckout(bare, checkout, e.target.headSha, deps.exec);
+    await resolverCheckout(
+      bare,
+      checkout,
+      e.target.headSha,
+      deps.exec,
+      runSignal,
+    );
     e.resolver = {
       state: "resolving",
       path: checkout,
@@ -407,7 +463,7 @@ export async function executeResolverLoop(
     let converged = false;
     let outstanding: any[] = [];
     for (let round = 1; round <= maxRounds; round++) {
-      signal.throwIfAborted();
+      runSignal.throwIfAborted();
       e.resolver.round = round;
       const transcript = join(resolverDir, `resolver-${round}.jsonl`);
       e.resolver.transcript = transcript;
@@ -431,6 +487,7 @@ export async function executeResolverLoop(
           e.target.baseSha,
         ],
         deps.exec,
+        runSignal,
       );
       const result = await deps.resolve({
         root: checkout,
@@ -450,7 +507,7 @@ export async function executeResolverLoop(
           e.resolver.session = file;
           save();
         },
-        signal,
+        signal: runSignal,
       });
       for (const path of result.changed ?? []) changed.add(path);
       const annotated = (result.dispositions ?? []).map((d: any) => ({
@@ -491,7 +548,7 @@ export async function executeResolverLoop(
         input.settings,
         checkout,
         deps.exec,
-        signal,
+        runSignal,
         round === maxRounds
           ? "Final resolver-loop review. Report only real merge-blocking defects still present. Do not report praise or repeat feedback that was fixed, invalid, irrelevant, or out of scope."
           : "Resolver-loop follow-up review. Report only defects still present in the current code. Do not report praise or repeat feedback that was fixed, invalid, irrelevant, or out of scope.",
@@ -570,15 +627,16 @@ export async function executeResolverLoop(
       setResolverAttention(`After resolver loop: ${error}`, after.headSha);
     }
   } catch (error) {
-    if (signal.aborted) e.resolver.state = "cancelled";
+    if (runSignal.aborted) e.resolver.state = "cancelled";
     else {
       e.resolver.state = "failed";
       e.resolver.error = String(error);
     }
   } finally {
+    cancellation.dispose();
     clearInterval(beat);
     finish(status);
-    if (signal.aborted) status.state = "cancelled";
+    if (runSignal.aborted) status.state = "cancelled";
     save();
   }
 }
