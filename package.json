@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-pair-review",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Catch pull-request issues with retained review evidence and opt-in resolver loops that keep fixes local until you approve publication.",
   "private": true,
   "license": "MIT",

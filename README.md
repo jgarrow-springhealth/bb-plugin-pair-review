@@ -32,10 +32,10 @@ GitHub PR URLs must use HTTPS on the configured hostname. Cross-repository fork 
 
 ## Installation
 
-Install the latest compatible 0.1 release from GitHub:
+Install the latest compatible 0.2 release from GitHub:
 
 ```sh
-bb plugin install 'git:https://github.com/jgarrow-springhealth/bb-plugin-pair-review.git@^0.1.0'
+bb plugin install 'git:https://github.com/jgarrow-springhealth/bb-plugin-pair-review.git@^0.2.0'
 ```
 
 BB shows the resolved source and asks for confirmation because third-party plugins run with full trust. Prefer a tagged release or explicit ref when one is available. For local development installs:
