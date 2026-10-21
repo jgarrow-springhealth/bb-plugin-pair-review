@@ -8,6 +8,7 @@ Pair Review brings a local-first GitHub pull-request review workflow into BB. It
 - Inspect a PR's committed patch before analysis, then review Pair Review findings, human review feedback, activity, and retained results in **Details**.
 - Start a review for one PR, a selected batch, or a local branch. Choose any native Pair Review analysis provider—including Claude Code, Codex, Copilot, OpenCode, Cursor, Pi, OMP, Antigravity, or Muse—and keep Pair Review's normal HOME, history, and shared SQLite database.
 - Start a resolver loop only with an explicit confirmation. It evaluates each finding or human comment, edits an isolated checkout, reruns the full review, and stops early when clean or at the configured 1–5 round limit.
+- Start a review anywhere and follow it in BB. Reviews started in the Pair Review app in your browser, or with `pair-review` from a terminal or Pi session, appear on the page marked **started outside BB**: running ones show as in progress, finished ones with their findings. BB only reads them; it never changes them.
 - Open the verified run in the native Pair Review app. Compatible running apps are reused; supported retained legacy runs can open in an isolated viewer.
 - Optionally show PR briefings and recent review links when the separate **PR Briefings** and **Projects & Sections** plugins are installed.
 
@@ -53,6 +54,15 @@ bb plugin reload pair-review
 4. Open **Details** to inspect findings, source patches, saved feedback, and run activity. **Open Pair Review** opens the verified native run. Details checks GitHub when it opens: an **Outdated** pill marks findings for an earlier commit (hover it for the commits and when GitHub was checked), and **Freshness** always says when GitHub was last checked.
 5. For a PR you authored, choose **Start resolver loop** and confirm the maximum rounds. Resolution never starts as a side effect of review.
 6. If fixes converge, inspect every change and run behavioral validation before choosing the final validation action. With publication disabled, the commit stays in the isolated local checkout; with publication enabled, the guarded final action may push to the existing PR branch.
+
+### Reviews started outside BB
+
+Pair Review records every analysis in its shared database no matter who started it, and BB reads that database on each refresh. Runs BB started itself are matched to their own batch records and are not listed twice. Everything else from the last 14 days (plus anything still running) is listed, one entry per PR for its latest run, plus its latest finished run when a newer one is still running or did not finish.
+
+- **Running** shows while Pair Review's database says the run is in progress. If a run has been "running" for more than 30 minutes and the Pair Review app is not reporting it, BB shows it as **interrupted** instead of in progress forever.
+- **Details** shows the findings Pair Review recorded and the exact diff it analyzed. **Open Pair Review** opens that run in the native app. **Stop review** works when the Pair Review app is the one running it; a review running in a terminal has to be stopped there.
+- A PR reviewed outside BB counts as reviewed in the queue, so **Hide current reviews** treats it like a BB review, and BB won't start a second review of a PR that Pair Review is already analyzing.
+- Resolver loops and publication stay BB-only. Start one from the PR page; it begins with a fresh review.
 
 `bb pair-review status` prints the retained batch snapshot as JSON for read-only diagnostics.
 

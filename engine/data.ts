@@ -151,6 +151,11 @@ export class GitHub {
   exec: Run;
   /** Queue discovery only. Reviews always hydrate the live pull request. */
   known?: KnownPullRequests;
+  /**
+   * Reviews finished outside BB (Pair Review app or terminal), by PR key.
+   * They count as earlier reviews when judging whether a PR is up to date.
+   */
+  external?: () => Map<string, NonNullable<PullRequest["previous"]>>;
   private listed = new Map<string, Promise<PullRequest>>();
   constructor(host = "github.com", exec: Run = run) {
     this.host = Host.parse(host);
@@ -316,7 +321,22 @@ export class GitHub {
                 : s.updatedAt,
             model: String(e.review.model ?? "unknown"),
           });
-    return prs.map((t) => ({ ...t, previous: hist.get(keyFor(t)) }));
+    let outside: ReturnType<NonNullable<GitHub["external"]>> | undefined;
+    try {
+      outside = this.external?.();
+    } catch {}
+    return prs.map((t) => {
+      const key = keyFor(t),
+        own = hist.get(key),
+        other = outside?.get(key);
+      const newest =
+        own && other
+          ? Date.parse(other.at) > Date.parse(own.at)
+            ? other
+            : own
+          : (own ?? other);
+      return { ...t, previous: newest };
+    });
   }
   async feedback(t: PullRequest): Promise<Feedback> {
     // GraphQL pagination is checked at every connection; do not mislabel a partial snapshot complete.

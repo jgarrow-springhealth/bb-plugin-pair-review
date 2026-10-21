@@ -1128,7 +1128,10 @@ function PairReviewPage({ subPath }: { subPath: string }) {
           <h3 title={r.title}>{r.title}</h3>
           <p className="pr-row-meta">
             {r.subject} · {r.author} · {when(r.updatedAt)} ·{" "}
-            <code>{short(r.head)}</code> · attempt {r.attempt}
+            <code>{short(r.head)}</code> ·{" "}
+            {r.origin === "external"
+              ? "started outside BB"
+              : `attempt ${r.attempt}`}
           </p>
           {(resolverCardLabel(r.resolverState) ||
             (!r.dismissed && (r.attention || r.resolverError))) && (
@@ -2401,7 +2404,9 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                     →{" "}
                     <code title={detailRow.head}>{short(detailRow.head)}</code>{" "}
                     · {when(detailRow.updatedAt)} ·{" "}
-                    {data.health.provider ?? "pi"} · {detailRow.model}
+                    {detailRow.provider ?? data.health.provider ?? "pi"} ·{" "}
+                    {detailRow.model}
+                    {detailRow.origin === "external" && " · started outside BB"}
                   </p>
                   <div className="pr-actions">
                     {detailRow.url && (
@@ -2465,7 +2470,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                         Stop review
                       </Action>
                     )}
-                    {detailRow.running && (
+                    {detailRow.running && detailRow.origin !== "external" && (
                       <Action
                         variant="outline"
                         disabled={!!busy}
@@ -2579,14 +2584,17 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       tone="bad"
                       title={
                         <h2 id="pr-attention-title">
-                          {detailRow.reviewState === "needs_attention"
+                          {detailRow.reviewState === "needs_attention" ||
+                          detailRow.origin === "external"
                             ? "Review could not finish"
                             : "Human decision required"}
                         </h2>
                       }
                     >
                       <p>
-                        {detailRow.reviewState === "needs_attention"
+                        {detailRow.origin === "external"
+                          ? "Pair Review did not finish this review, which was started outside BB. Open it in Pair Review for details, or start a fresh review."
+                          : detailRow.reviewState === "needs_attention"
                           ? "Pair Review stopped before it could produce verified findings. Start a fresh review or inspect the technical details below."
                           : "This review has retained work that needs a person to inspect before continuing."}
                       </p>
@@ -2829,7 +2837,9 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                             onOpen: () => open(r),
                             detail: [
                               r.model,
-                              `attempt ${r.attempt}`,
+                              r.origin === "external"
+                                ? "started outside BB"
+                                : `attempt ${r.attempt}`,
                               short(r.head),
                               r.submitted ? "submitted" : null,
                               r.dismissed ? "dismissed" : null,

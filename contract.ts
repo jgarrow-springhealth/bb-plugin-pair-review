@@ -144,6 +144,10 @@ export interface ReviewRow {
   base: string;
   branch: string;
   model: string;
+  /** Pair Review provider that ran an external review; BB's own use settings. */
+  provider?: string;
+  /** "external" for a run started outside BB (Pair Review app or terminal). */
+  origin?: "bb" | "external";
   updatedAt: string;
   attempt: number;
   reviewState: string;
@@ -281,6 +285,8 @@ const rowSchema = z.object({
   base: sha,
   branch: z.string(),
   model: z.string(),
+  provider: z.string().optional(),
+  origin: z.enum(["bb", "external"]).optional(),
   updatedAt: z.string(),
   attempt: z.number().int(),
   reviewState: z.string(),

@@ -84,6 +84,25 @@ import { loginShellOpenAIKey } from "./engine/model-auth.ts";
 import { git } from "./engine/git.ts";
 import { repositoryLink } from "./repository.ts";
 import { latestReviewSelection } from "./pr-details.ts";
+import {
+  claimWindow,
+  externalBatchId,
+  externalFindings,
+  externalKey,
+  externalRow,
+  externalRunId,
+  findingCounts,
+  listExternalRuns,
+  liveProgress,
+  loadExternalRun,
+  newestFor,
+  probeLive,
+  STALE_RUNNING_MS,
+  type Claimed,
+  type ExternalRun,
+  type LiveAnalysis,
+} from "./external-runs.ts";
+import { relativeRefreshedAt } from "./time.ts";
 import { parseTeams, parseTeammates, requestTag } from "./queue.ts";
 export const clean = (s: unknown) =>
   String(s ?? "")
@@ -792,10 +811,234 @@ export async function invoke(request: Request) {
       db.close();
     }
   };
+  // ---- Reviews started outside BB --------------------------------------
+  // Pair Review records every run in its shared database, whoever started it.
+  // Runs BB started itself are recognized and left to BB's own batch records.
+  const externalClaims = (statuses: ReturnType<typeof recent>): Claimed => {
+    const runIds = new Set<string>(),
+      windows: Claimed["windows"] = [];
+    for (const s of statuses) {
+      const running = ["running", "queued"].includes(s.state),
+        from = Date.parse(s.startedAt ?? s.createdAt),
+        to = running ? Infinity : Date.parse(s.updatedAt);
+      for (const e of s.entries) {
+        if (typeof e.review.runId === "string") runIds.add(e.review.runId);
+        if (e.target.kind === "pr" && Number.isFinite(from) && !Number.isNaN(to))
+          windows.push(claimWindow(e.key, from, to));
+      }
+    }
+    return { runIds, windows };
+  };
+  const externalRuns = (statuses = recent(root)): ExternalRun[] => {
+    try {
+      return listExternalRuns({
+        database: runtime.database,
+        hostname: p.hostname,
+        nowMs: Date.now(),
+        claimed: externalClaims(statuses),
+        ownRoots: [ROOT, join(runtime.home, ".pair-review")],
+      });
+    } catch {
+      return [];
+    }
+  };
+  /** Ask the running Pair Review app what it is analyzing, only when needed. */
+  const liveFor = async (runs: ExternalRun[]) =>
+    runs.some(
+      (r) => r.status === "running" && Date.now() - r.startedMs > STALE_RUNNING_MS,
+    )
+      ? probeLive(runtime.port)
+      : null;
+  const externalRowFor = (
+    run: ExternalRun,
+    live: LiveAnalysis[] | null,
+    counts: Map<string, number>,
+    dismissed: Record<string, unknown>,
+  ) =>
+    externalRow(run, {
+      hostname: p.hostname,
+      nowMs: Date.now(),
+      live,
+      count: counts.get(run.runId) ?? run.total,
+      dismissed: dismissalId(externalBatchId(run.runId), 0) in dismissed,
+      submitted: submittedRuns().has(run.runId),
+      finalReview: (state, count) =>
+        readyForFinalReview(
+          state,
+          count,
+          findingDispositions().get(run.runId),
+        ),
+      clean,
+    });
+  const externalRows = async (statuses: ReturnType<typeof recent>) => {
+    const runs = externalRuns(statuses),
+      live = await liveFor(runs),
+      counts = findingCounts(
+        runtime.database,
+        runs.filter((r) => r.status === "completed").map((r) => r.runId),
+      ),
+      dismissed = loadDismissals(root).entries;
+    return runs.map((run) => externalRowFor(run, live, counts, dismissed));
+  };
+  github.external = () => {
+    const found = new Map<
+      string,
+      { headSha: string; at: string; model: string }
+    >();
+    for (const run of externalRuns())
+      if (run.kind === "pr" && run.status === "completed" && run.headSha) {
+        const key = `${p.hostname}/${run.repository}#${run.prNumber}`.toLowerCase();
+        const at = new Date(run.completedMs ?? run.startedMs).toISOString();
+        const known = found.get(key);
+        if (!known || Date.parse(at) > Date.parse(known.at))
+          found.set(key, { headSha: run.headSha, at, model: run.model });
+      }
+    return found;
+  };
+  const externalFeedback = async (
+    run: ExternalRun,
+  ): Promise<Details["feedback"]> => {
+    const path = join(
+      dismissalDirectory(root),
+      `external-feedback-${hash(run.runId).slice(0, 24)}.json`,
+    );
+    try {
+      const cached = json(path);
+      if (cached.feedback)
+        return {
+          complete: true,
+          error: null,
+          comments: Feedback.parse(cached.feedback).comments.map((c) => ({
+            author: clean(c.author),
+            body: clean(c.body),
+            location: clean(c.location),
+            disposition: null,
+            reason: null,
+          })),
+        };
+      // A failed read is not retried on every poll.
+      if (typeof cached.error === "string" && Date.now() - cached.at < 60_000)
+        return { complete: false, error: cached.error, comments: [] };
+    } catch {}
+    const [owner = "", repo = ""] = run.repository.split("/");
+    try {
+      const feedback = Feedback.parse(
+        await github.feedback({
+          kind: "pr",
+          host: p.hostname,
+          owner,
+          repo,
+          number: run.prNumber!,
+          author: run.author ?? "",
+        } as PullRequest),
+      );
+      atomicJson(path, { at: Date.now(), feedback });
+      return {
+        complete: true,
+        error: null,
+        comments: feedback.comments.map((c) => ({
+          author: clean(c.author),
+          body: clean(c.body),
+          location: clean(c.location),
+          disposition: null,
+          reason: null,
+        })),
+      };
+    } catch (error) {
+      atomicJson(path, { at: Date.now(), error: clean(error) });
+      return { complete: false, error: clean(error), comments: [] };
+    }
+  };
+  const externalDetails = async (runId: string): Promise<Details> => {
+    const found = loadExternalRun(runtime.database, runId);
+    if (!found) throw Error("This Pair Review run no longer exists");
+    const { run } = found;
+    const live = run.status === "running" ? await probeLive(runtime.port) : null;
+    const counts = findingCounts(runtime.database, [runId]);
+    const row = externalRowFor(run, live, counts, loadDismissals(root).entries);
+    const comments = externalFindings(runtime.database, runId);
+    const findings = comments.map((x, i) => ({
+      id: i,
+      file: clean(x.file),
+      title: clean(x.title ?? "Finding"),
+      body: clean(x.body ?? x.title ?? ""),
+      line: x.line,
+      sourcePath: null,
+      kind: x.type ? clean(x.type) : null,
+      severity: x.severity ? clean(x.severity) : null,
+      suggestion: x.suggestion ? clean(x.suggestion) : null,
+      disposition:
+        x.status === "adopted" || x.status === "dismissed" ? x.status : null,
+      reason: null,
+    }));
+    let patch: string | null = null,
+      changes = row.changes;
+    if (found.diff && Buffer.byteLength(found.diff, "utf8") <= MAX_PAGE_PATCH_BYTES)
+      patch = found.diff;
+    else if (!found.diff && run.kind === "pr" && row.url)
+      try {
+        patch = await pullRequestPatch(
+          github,
+          await currentPullRequest(github, row.url),
+          cacheDir,
+        );
+      } catch {}
+    if (patch !== null) changes = patchStats(patch);
+    const started = relativeRefreshedAt(new Date(run.startedMs).toISOString());
+    const outside = "started outside BB";
+    const summary =
+      row.running
+        ? `Pair Review is analyzing these changes (${outside}, ${started}). Findings appear here when it finishes.`
+        : row.reviewState === "interrupted"
+          ? `This review was ${outside} ${started} and never reported finishing. Pair Review may have been closed before it completed.`
+          : row.reviewState === "failed"
+            ? `Pair Review recorded this review (${outside}, ${started}) as failed.`
+            : row.reviewState === "cancelled"
+              ? `This review (${outside}, ${started}) was cancelled before it produced findings.`
+              : row.count
+                ? `${row.count} finding${row.count === 1 ? "" : "s"} in the changes Pair Review reviewed (${outside}). ${row.submitted ? "Pair Review records this review as submitted to GitHub." : "These results are local; nothing has been submitted to GitHub."}`
+                : `No findings were reported for the changes Pair Review reviewed (${outside}).${row.submitted ? " Pair Review records this review as submitted to GitHub." : ""}`;
+    const analysis = live?.find((entry) => entry.reviewId === run.reviewId);
+    return {
+      row,
+      summary,
+      changes,
+      findings,
+      patches: patch === null ? [] : splitPatch(patch),
+      briefing: {
+        available: false,
+        state: "unavailable",
+        head: null,
+        file: null,
+        hostId: null,
+        stale: false,
+        error: null,
+        updatedAt: null,
+        threadId: null,
+      },
+      activity: analysis
+        ? await liveProgress(runtime.port, analysis.analysisId)
+        : [],
+      feedback:
+        run.kind === "pr" && !row.running
+          ? await externalFeedback(run)
+          : {
+              complete: false,
+              error: row.running
+                ? "Feedback is captured once the review finishes"
+                : "Feedback is only captured for pull requests",
+              comments: [],
+            },
+    };
+  };
   const requireFork = () => {
     if (!f.ready) throw Error(f.error ?? "Pair Review installation unavailable");
   };
   const selected = (input: any) => {
+    if (externalRunId(input.batchId))
+      throw Error(
+        "This review was started outside BB, so BB cannot change it. Start a new review or resolver loop from the PR page instead.",
+      );
     const dir = directory(input.batchId, root),
       s = readStatus(dir),
       e = s.entries[input.index];
@@ -939,7 +1182,8 @@ export async function invoke(request: Request) {
     const rows: ReviewRow[] = [],
       notes: string[] = [],
       dismissed = loadDismissals(root).entries;
-    for (const s of recent(root).slice(0, 100)) {
+    const statuses = recent(root);
+    for (const s of statuses.slice(0, 100)) {
       try {
         const input = loadInput(directory(s.batchId, root));
         notes.push(...warnings(s));
@@ -958,6 +1202,17 @@ export async function invoke(request: Request) {
       } catch (e) {
         notes.push(clean(e));
       }
+    }
+    try {
+      rows.push(...(await externalRows(statuses)));
+      // Stable: rows of one batch keep their order; newest activity first.
+      rows.sort(
+        (a, b) =>
+          (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0),
+      );
+      rows.length = Math.min(rows.length, 300);
+    } catch (e) {
+      notes.push(`Reviews started outside BB could not be read: ${clean(e)}`);
     }
     let queue: QueueItem[] = [];
     let queueRefreshedAt: string | null = null;
@@ -1124,6 +1379,12 @@ export async function invoke(request: Request) {
             s.entries.some((e) => targets.some((t) => keyFor(t) === e.key))
           )
             throw Error("A live batch already contains this review subject");
+        const outside = await externalRows(recent(root));
+        for (const t of targets)
+          if (outside.some((r) => r.running && r.key === keyFor(t)))
+            throw Error(
+              `Pair Review is already reviewing ${subject(t)} outside BB. Wait for it to finish, or stop it first.`,
+            );
         const batchId =
             now().replace(/[-:.]/g, "") + "-" + randomBytes(3).toString("hex"),
           dir = directory(batchId, root);
@@ -1229,13 +1490,28 @@ export async function invoke(request: Request) {
         feedback.error = clean(error);
       }
       // Resolve saved/running work only. Viewing a PR must never invoke launch().
+      const statuses = recent(root);
+      let review = latestReviewSelection(
+        statuses,
+        key,
+        new Set(Object.keys(loadDismissals(root).entries)),
+      );
+      // A review started outside BB wins when it is running, or newer than
+      // BB's latest finished one.
+      const outside = newestFor(await externalRows(statuses), key);
+      if (outside) {
+        const own = review && statuses.find((s) => s.batchId === review!.batchId);
+        const ownActive = !!own && ["queued", "running"].includes(own.state);
+        const ownMs = own ? Date.parse(own.updatedAt) : -Infinity;
+        if (
+          outside.running ||
+          (!ownActive && Date.parse(outside.updatedAt) > ownMs)
+        )
+          review = { batchId: outside.batchId, index: 0 };
+      }
       return {
         pr,
-        review: latestReviewSelection(
-          recent(root),
-          key,
-          new Set(Object.keys(loadDismissals(root).entries)),
-        ),
+        review,
         patches,
         patchError,
         feedback,
@@ -1243,8 +1519,10 @@ export async function invoke(request: Request) {
       };
     }
     case "details": {
-      const q = rpcContract.details.input.parse(payload),
-        v = selected(q);
+      const q = rpcContract.details.input.parse(payload);
+      const outsideRun = externalRunId(q.batchId);
+      if (outsideRun) return externalDetails(outsideRun);
+      const v = selected(q);
       const { e, s, input, dir } = v;
       let suggestions: any[] = [],
         patches: Details["patches"] = [],
@@ -1579,10 +1857,58 @@ export async function invoke(request: Request) {
       return { batchId: v.s.batchId, index: q.index };
     }
     case "action": {
-      const q = rpcContract.action.input.parse(payload),
-        v = selected(q);
+      const q = rpcContract.action.input.parse(payload);
       if (["cancel", "validate", "dismiss"].includes(q.action) && !q.confirmed)
         throw Error("Explicit confirmation is required");
+      const outsideRun = externalRunId(q.batchId);
+      if (outsideRun) {
+        const found = loadExternalRun(runtime.database, outsideRun);
+        if (!found) throw Error("This Pair Review run no longer exists");
+        if (["dismiss", "restore"].includes(q.action)) {
+          const { run } = found;
+          if (
+            q.action === "dismiss" &&
+            run.status === "running" &&
+            Date.now() - run.startedMs <= STALE_RUNNING_MS
+          )
+            throw Error("A running review cannot be dismissed");
+          await withLock(dismissalDirectory(root), async () =>
+            setDismissed(
+              root,
+              q.batchId,
+              0,
+              {
+                key: externalKey(run, p.hostname),
+                target: { headSha: run.headSha ?? "0".repeat(40) } as Entry["target"],
+              },
+              q.action === "dismiss",
+            ),
+          );
+          return { accepted: true };
+        }
+        if (q.action === "cancel") {
+          // Stop it through the Pair Review app that is running it.
+          if (found.run.status !== "running")
+            throw Error("This review is not running");
+          const live = await probeLive(runtime.port);
+          const analysis = live?.find((x) => x.reviewId === found.run.reviewId);
+          if (!analysis)
+            throw Error(
+              "Pair Review is not reporting this review as running here. If it was started from a terminal, stop it there.",
+            );
+          const response = await fetch(
+            `http://127.0.0.1:${runtime.port}/api/analyses/${encodeURIComponent(analysis.analysisId)}/cancel`,
+            { method: "POST", signal: AbortSignal.timeout(5000) },
+          );
+          if (!response.ok)
+            throw Error(`Pair Review could not stop it (${response.status})`);
+          return { accepted: true };
+        }
+        throw Error(
+          "This review was started outside BB, so BB cannot change it. Start a new review or resolver loop from the PR page instead.",
+        );
+      }
+      const v = selected(q);
       if (["dismiss", "restore"].includes(q.action)) {
         const lock = dismissalDirectory(root);
         await withLock(lock, async () => {
@@ -1665,6 +1991,21 @@ export async function invoke(request: Request) {
         await ensurePairReviewApp(runtime, f.version, bin);
         return {
           url: `http://localhost:${runtime.port}${pairReviewPrPath(coordinate)}`,
+        };
+      }
+      const outsideRun = externalRunId(q.batchId);
+      if (outsideRun) {
+        const found = loadExternalRun(runtime.database, outsideRun);
+        if (!found) throw Error("This Pair Review run no longer exists");
+        const { run } = found;
+        await ensurePairReviewApp(runtime, f.version, bin);
+        const [owner = "", repo = ""] = run.repository.split("/");
+        const route =
+          run.kind === "pr"
+            ? pairReviewPrPath({ owner, repo, number: run.prNumber! })
+            : `/local/${run.reviewId}`;
+        return {
+          url: `http://localhost:${runtime.port}${route}?runId=${encodeURIComponent(run.runId)}`,
         };
       }
       const { e } = selected(q);
