@@ -2923,13 +2923,13 @@ export default definePluginApp((app) => {
     kind: "action",
     id: "settings",
     label: "Pair Review settings",
-    icon: "Settings2",
+    icon: "Github",
     onActivate: ({ openPluginDetails }) => openPluginDetails(),
   });
   app.slots.navPanel({
     id: "reviews",
     title: "Pair Review",
-    icon: "Search",
+    icon: "Github",
     path: "reviews",
     component: PairReviewPage,
     experimental_sidebarAccessory: AttentionCount,

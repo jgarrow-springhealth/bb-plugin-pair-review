@@ -45,9 +45,22 @@ test("registers a dedicated Pair Review navigation page", async () => {
     id: "reviews",
     title: "Pair Review",
     path: "reviews",
-    icon: "Search",
+    icon: "Github",
   });
   expect(app.experimentalSidebarNavigations).toHaveLength(0);
+});
+test("the sidebar page and its settings action use icons BB recognizes", async () => {
+  const app = await loadPluginApp(() => import("../app"));
+  // BB draws an unrecognized icon name as its lightning-bolt fallback, so these
+  // must be real BB names (Settings2, for one, is not).
+  expect(app.navPanels[0]).toMatchObject({ icon: "Github" });
+  expect(app.experimentalSidebarFooterItems).toEqual([
+    expect.objectContaining({
+      id: "settings",
+      label: "Pair Review settings",
+      icon: "Github",
+    }),
+  ]);
 });
 test("shows a GitHub origin link, a header start bar, and the local-branch dialog", async () => {
   const app = await loadPluginApp(() => import("../app"));
@@ -74,7 +87,9 @@ test("shows a GitHub origin link, a header start bar, and the local-branch dialo
       .getByRole("button", { name: "Start Pair Review" })
       .hasAttribute("disabled"),
   ).toBe(true);
-  expect(slot.queryByRole("heading", { name: "Start a Pair Review" })).toBeNull();
+  expect(
+    slot.queryByRole("heading", { name: "Start a Pair Review" }),
+  ).toBeNull();
   const summary = slot.getByRole("region", { name: "Review summary" });
   const lists = slot.getByRole("region", { name: "Pair Review lists" });
   expect(

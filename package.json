@@ -23,7 +23,7 @@
     "name": "Pair Review",
     "description": "Catch pull-request issues with retained review evidence and opt-in resolver loops that keep fixes local until you approve publication.",
     "branding": {
-      "icon": "Search"
+      "icon": "Github"
     },
     "server": "./server.ts",
     "host": "./host.ts",
