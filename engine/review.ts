@@ -227,6 +227,19 @@ export function argumentsFor(
     ...(instructions ? ["--instructions", instructions] : []),
   ];
 }
+export class StaleReviewError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleReviewError";
+  }
+}
+const short = (sha: unknown) => (typeof sha === "string" ? sha.slice(0, 7) : "unknown");
+function staleReview(analyzed: unknown, t: Target) {
+  return new StaleReviewError(
+    `Pair Review analyzed an out-of-date copy of this PR (commit ${short(analyzed)}, but the PR is now at ${short(t.headSha)}). ` +
+      "Refresh the PR from GitHub in Pair Review, then retry the review.",
+  );
+}
 export function verifyOutput(
   raw: unknown,
   t: Target,
@@ -236,6 +249,8 @@ export function verifyOutput(
   prData?: any,
 ) {
   const out = Envelope.parse(raw);
+  if (t.kind === "pr" && out.run.head_sha !== t.headSha)
+    throw staleReview(out.run.head_sha, t);
   if (
     out.mode !== (t.kind === "pr" ? "pr" : "local") ||
     out.run.head_sha !== t.headSha ||
@@ -246,6 +261,13 @@ export function verifyOutput(
     )
   )
     throw Error("Degraded or unverifiable analysis mode/head/count");
+  if (
+    t.kind === "pr" &&
+    ((prData?.head_sha && prData.head_sha !== t.headSha) ||
+      (prData?.base_sha && prData.base_sha !== t.baseSha) ||
+      (stored?.head_sha && stored.head_sha !== t.headSha))
+  )
+    throw staleReview(prData?.head_sha ?? stored?.head_sha, t);
   if (
     stored?.id !== out.run.id ||
     stored.review_id !== out.run.review_id ||
@@ -375,6 +397,91 @@ export function databaseSnapshot(database: string, runId: string) {
     db.close();
   }
 }
+type StoredPrHead = { headSha?: string; baseSha?: string } | null;
+export function storedPrHead(
+  database: string,
+  t: Pick<Target & { kind: "pr" }, "owner" | "repo" | "number">,
+): StoredPrHead {
+  if (!existsSync(database)) return null;
+  const db = new DatabaseSync(safePath(database), { readOnly: true });
+  try {
+    const row = db
+      .prepare(
+        "SELECT pr_data FROM pr_metadata WHERE repository = ? COLLATE NOCASE AND pr_number = ?",
+      )
+      .get(`${t.owner}/${t.repo}`, t.number) as { pr_data?: string } | undefined;
+    if (!row?.pr_data) return null;
+    const data = JSON.parse(row.pr_data);
+    return { headSha: data?.head_sha, baseSha: data?.base_sha };
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+/**
+ * A running Pair Review app reuses its saved copy of a PR when a headless run
+ * is delegated to it, so a PR pushed to since its first review would be
+ * analyzed at the old commit. Ask the app to refresh the PR from GitHub first,
+ * just as its own Refresh button does. Without a matching running app the CLI
+ * analyzes in-process and fetches the PR itself, so nothing is needed.
+ */
+export async function refreshStalePr(
+  t: Target,
+  runtime: { database: string; dbId: string; port: number },
+  deps: {
+    fetch?: typeof fetch;
+    readStored?: (database: string, t: Target & { kind: "pr" }) => StoredPrHead;
+  } = {},
+): Promise<"not_needed" | "refreshed"> {
+  if (t.kind !== "pr") return "not_needed";
+  const fetchImpl = deps.fetch ?? fetch;
+  const readStored = deps.readStored ?? storedPrHead;
+  const stored = readStored(runtime.database, t);
+  if (!stored || (stored.headSha === t.headSha && stored.baseSha === t.baseSha))
+    return "not_needed";
+  const base = `http://127.0.0.1:${runtime.port}`;
+  try {
+    const health = await fetchImpl(`${base}/health`, {
+      signal: AbortSignal.timeout(2000),
+      redirect: "error",
+    });
+    const value: any = health.ok ? await health.json() : null;
+    if (value?.service !== "pair-review" || value.dbId !== runtime.dbId)
+      return "not_needed";
+  } catch {
+    return "not_needed";
+  }
+  const path = `/api/pr/${encodeURIComponent(t.owner)}/${encodeURIComponent(t.repo)}/${t.number}/refresh`;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}${path}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(120000),
+      redirect: "error",
+    });
+  } catch (err) {
+    throw new StaleReviewError(
+      `Pair Review's saved copy of this PR is out of date (commit ${short(stored.headSha)}, but the PR is now at ${short(t.headSha)}), and refreshing it from GitHub failed: ${err instanceof Error ? err.message : err}. Refresh the PR in Pair Review, then retry the review.`,
+    );
+  }
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body: any = await response.json();
+      if (typeof body?.error === "string") detail = body.error;
+    } catch {}
+    throw new StaleReviewError(
+      `Pair Review's saved copy of this PR is out of date (commit ${short(stored.headSha)}, but the PR is now at ${short(t.headSha)}), and refreshing it from GitHub failed: ${detail}. Refresh the PR in Pair Review, then retry the review.`,
+    );
+  }
+  const after = readStored(runtime.database, t);
+  if (after?.headSha !== t.headSha || after?.baseSha !== t.baseSha)
+    throw new StaleReviewError(
+      `This PR changed on GitHub after the review was queued (expected ${short(t.headSha)}, GitHub now has ${short(after?.headSha)}). Retry the review to pick up the latest commit.`,
+    );
+  return "refreshed";
+}
 export async function analyze(
   dir: string,
   t: Target,
@@ -396,6 +503,8 @@ export async function analyze(
     fixProvider: runtime.fixProvider,
     fixModel: runtime.fixModel,
   };
+  await refreshStalePr(t, runtime);
+  signal?.throwIfAborted();
   const cwd = privateDir(join(dir, "trusted"));
   // Use Pair Review's normal HOME, configuration, provider, and database. With
   // --no-server omitted, a compatible running app executes the analysis and

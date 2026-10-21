@@ -2,7 +2,12 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { GitHub, unchanged, owned, localTarget } from "./data.ts";
 import { retained, resolverCheckout, git } from "./git.ts";
-import { analyze, analyzeResolverRound, verifySaved } from "./review.ts";
+import {
+  analyze,
+  analyzeResolverRound,
+  verifySaved,
+  StaleReviewError,
+} from "./review.ts";
 import {
   initial,
   atomicJson,
@@ -281,6 +286,7 @@ export async function execute(
           }
         } catch (err) {
           if (runSignal.aborted) e.review.state = "cancelled";
+          else if (err instanceof StaleReviewError) attention(e, err.message);
           else attention(e, `Analysis output unverifiable or failed: ${err}`);
         } finally {
           cancellation.dispose();
