@@ -58,7 +58,10 @@ const hostDetails = {
   feedback: { complete: false, error: null, comments: [] },
 };
 
-function harness(callPluginRpc: (request: any) => unknown | Promise<unknown>) {
+function harness(
+  callPluginRpc: (request: any) => unknown | Promise<unknown>,
+  installed?: string[],
+) {
   const host = createFakePluginHost({
     pluginId: "pair-review",
     sdk: {
@@ -67,6 +70,9 @@ function harness(callPluginRpc: (request: any) => unknown | Promise<unknown>) {
       },
       plugins: {
         callRpc: callPluginRpc,
+        ...(installed
+          ? { list: async () => ({ plugins: installed.map((id) => ({ id, enabled: true })) }) }
+          : {}),
       },
     },
     experimental_callHostRpc: async ({ input }) => {
@@ -134,6 +140,17 @@ test("details show the Stack Control stacks running the PR when that plugin is i
     }),
   );
   expect(result.stacks).toEqual({ available: true, ...stacks });
+  await h.lifecycle.dispose();
+});
+
+test("details never ask Stack Control when it isn't installed", async () => {
+  const callPluginRpc = vi.fn(async () => {
+    throw Error("plugin not installed");
+  });
+  const h = harness(callPluginRpc, ["pr-briefings"]);
+  const result = (await h.callRpc("details", { batchId: "batch", index: 0 })) as any;
+  expect(result.stacks).toEqual({ available: false, stacks: [], launchPath: null });
+  expect(callPluginRpc).not.toHaveBeenCalledWith(expect.objectContaining({ pluginId: "stack-control" }));
   await h.lifecycle.dispose();
 });
 

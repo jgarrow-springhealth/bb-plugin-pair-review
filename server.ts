@@ -177,11 +177,28 @@ export default function plugin(bb: BbPluginApi) {
     updatedAt: null,
     threadId: null,
   });
+  // Stack Control is optional: Pair Review never needs it, and shows the Test stack figure only when it's
+  // installed and enabled. The check is cached for a minute; when BB can't list plugins it falls back to
+  // trying the call, which fails quietly without the plugin.
+  let stackControlCheck: { at: number; installed: boolean | null } | null = null;
+  async function stackControlInstalled(): Promise<boolean | null> {
+    if (stackControlCheck && Date.now() - stackControlCheck.at < 60_000) return stackControlCheck.installed;
+    let installed: boolean | null;
+    try {
+      const { plugins } = await bb.sdk.plugins.list();
+      installed = plugins.some((plugin) => plugin.id === "stack-control" && plugin.enabled);
+    } catch {
+      installed = null;
+    }
+    stackControlCheck = { at: Date.now(), installed };
+    return installed;
+  }
   /** Stack Control stacks running this PR, and where to launch one. Empty when that plugin isn't installed. */
   async function getStacks(url: string | null, branch?: string): Promise<PrStacks> {
     const none: PrStacks = { available: false, stacks: [], launchPath: null };
     const match = url ? /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url) : null;
     if (!match) return none;
+    if ((await stackControlInstalled()) === false) return none;
     try {
       const result = await bb.sdk.plugins.callRpc({
         pluginId: "stack-control",
