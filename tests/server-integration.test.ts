@@ -101,6 +101,39 @@ test("Pair Review works alone and omits the optional briefing", async () => {
     updatedAt: null,
     threadId: null,
   });
+  expect((result as any).stacks).toEqual({ available: false, stacks: [], launchPath: null });
+  await h.lifecycle.dispose();
+});
+
+test("details show the Stack Control stacks running the PR when that plugin is installed", async () => {
+  const stacks = {
+    stacks: [
+      {
+        namespace: "ns-1",
+        name: "pr-project-12",
+        status: "ready",
+        health: "4 of 4 required healthy",
+        expiresAt: "2026-10-26T18:20:29.636Z",
+        path: "/plugins/stack-control/stacks/ns-1",
+        why: "runs #12",
+      },
+    ],
+    launchPath: "/plugins/stack-control/stacks/~launch/x",
+  };
+  const callPluginRpc = vi.fn(async (request: any) => {
+    if (request.pluginId === "stack-control") return stacks;
+    throw Error("plugin not installed");
+  });
+  const h = harness(callPluginRpc);
+  const result = (await h.callRpc("details", { batchId: "batch", index: 0 })) as any;
+  expect(callPluginRpc).toHaveBeenCalledWith(
+    expect.objectContaining({
+      pluginId: "stack-control",
+      method: "stacks_for",
+      input: { repo: "example/project", number: 12, headRef: "feature" },
+    }),
+  );
+  expect(result.stacks).toEqual({ available: true, ...stacks });
   await h.lifecycle.dispose();
 });
 

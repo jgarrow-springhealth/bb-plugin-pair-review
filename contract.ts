@@ -223,6 +223,28 @@ export interface Snapshot {
     legacyContract?: boolean;
   };
 }
+/** What the Stack Control plugin knows about stacks for a PR; `available` is false when it isn't installed. */
+export const prStacksSchema = z.object({
+  available: z.boolean(),
+  stacks: z.array(
+    z.object({
+      namespace: z.string(),
+      name: z.string(),
+      status: z.string(),
+      health: z.string().nullable(),
+      expiresAt: z.string().nullable(),
+      path: z.string(),
+      why: z.string(),
+      tone: z.enum(["neutral", "good", "warn", "bad", "info"]).optional(),
+      healthShort: z.string().optional(),
+      services: z.array(z.object({ name: z.string(), color: z.string() })).optional(),
+      headline: z.object({ text: z.string(), tone: z.enum(["neutral", "good", "warn", "bad", "info"]), detail: z.string() }).optional(),
+    }),
+  ),
+  launchPath: z.string().nullable(),
+});
+export type PrStacks = z.infer<typeof prStacksSchema>;
+
 export interface Details {
   row: ReviewRow;
   summary: string;
@@ -252,6 +274,8 @@ export interface Details {
     updatedAt: number | null;
     threadId: string | null;
   };
+  /** Stack Control stacks running this PR, from the Stack Control plugin when it is installed. */
+  stacks?: PrStacks;
   activity: string[];
   feedback: {
     complete: boolean;
@@ -390,6 +414,7 @@ const detailsSchema = z.object({
     updatedAt: z.number().int().nonnegative().nullable(),
     threadId: z.string().nullable(),
   }),
+  stacks: prStacksSchema.optional(),
   activity: z.array(z.string()),
   feedback: z.object({
     complete: z.boolean(),
@@ -447,6 +472,7 @@ export const rpcContract = defineRpcContract({
       feedback: detailsSchema.shape.feedback,
       canResolve: z.boolean(),
       briefing: detailsSchema.shape.briefing,
+      stacks: detailsSchema.shape.stacks,
     }),
   },
   resolverStart: {

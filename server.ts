@@ -7,6 +7,8 @@ import {
   hostContract,
   Preferences,
   DEFAULT_PREFERENCES,
+  prStacksSchema,
+  type PrStacks,
   type Request,
   type Snapshot,
 } from "./contract";
@@ -175,6 +177,23 @@ export default function plugin(bb: BbPluginApi) {
     updatedAt: null,
     threadId: null,
   });
+  /** Stack Control stacks running this PR, and where to launch one. Empty when that plugin isn't installed. */
+  async function getStacks(url: string | null, branch?: string): Promise<PrStacks> {
+    const none: PrStacks = { available: false, stacks: [], launchPath: null };
+    const match = url ? /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url) : null;
+    if (!match) return none;
+    try {
+      const result = await bb.sdk.plugins.callRpc({
+        pluginId: "stack-control",
+        method: "stacks_for",
+        input: { repo: match[1], number: Number(match[2]), ...(branch ? { headRef: branch } : {}) } as any,
+        outputSchema: prStacksSchema.omit({ available: true }),
+      });
+      return { available: true, ...result };
+    } catch {
+      return none;
+    }
+  }
   async function getBriefing(url: string | null, head?: string) {
     if (!url) return unavailableBriefing();
     try {
@@ -271,13 +290,19 @@ export default function plugin(bb: BbPluginApi) {
     details: async (input) => {
       const { result } = await invoke("details", input);
       const details = result as any;
-      details.briefing = await getBriefing(details.row.url, details.row.head);
+      [details.briefing, details.stacks] = await Promise.all([
+        getBriefing(details.row.url, details.row.head),
+        getStacks(details.row.url, details.row.branch),
+      ]);
       return details;
     },
     prDetails: async (input) => {
       const { result } = await invoke("prDetails", input);
       const details = result as any;
-      details.briefing = await getBriefing(details.pr.url, details.pr.head);
+      [details.briefing, details.stacks] = await Promise.all([
+        getBriefing(details.pr.url, details.pr.head),
+        getStacks(details.pr.url, details.pr.branch),
+      ]);
       return details;
     },
     resolverStart: async (input) => {

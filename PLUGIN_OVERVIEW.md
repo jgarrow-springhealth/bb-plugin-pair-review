@@ -6,7 +6,7 @@
 - Your choice of Pair Review analysis provider: Claude Code, Codex, Copilot, OpenCode, Cursor Agent, Pi, OMP, Antigravity, or Muse.
 - A separately confirmed resolver loop for PRs you authored, powered by Pi, Claude Code, or Codex. It evaluates findings and human comments, proposes guarded edits, reruns Pair Review, and stops when clean or at the configured 1–5 round limit.
 - Reviews you start outside BB, in the Pair Review app or from a terminal or Pi session, show up on the page (in progress or finished, with findings) so you can kick one off elsewhere and check on it here.
-- A verified link to the native Pair Review run. Optional PR Briefings and Projects & Sections integrations appear only when those plugins are installed.
+- A verified link to the native Pair Review run. Optional PR Briefings, Projects & Sections and Stack Control integrations appear only when those plugins are installed. With Stack Control, the summary card gets a **Test stack** figure: the one thing to know first (failed, a service down, expiring, behind the PR, test scenarios verified, or ready to test) with the stack name and time left. It opens the stack, or launches one prefilled with the PR when there is none.
 
 Opening Details never starts analysis or changes code. Review never starts resolution. Publication is off by default; enabling it still requires a converged resolver, explicit human-validation attestation, ownership and unchanged-ref checks, and an exact-SHA lease.
 

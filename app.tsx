@@ -11,6 +11,7 @@ import {
   useRpc,
   useRealtime,
   useBbNavigate,
+  UrlLink,
   Markdown,
   experimental_Diff as Diff,
   experimental_FileLink as FileLink,
@@ -336,6 +337,49 @@ function CodeChanges({
     </section>
   );
 }
+function timeLeft(expiresAt: string, now = Date.now()) {
+  const hours = (Date.parse(expiresAt) - now) / 3_600_000;
+  if (!Number.isFinite(hours)) return null;
+  if (hours <= 0) return "expired";
+  return hours < 1 ? `${Math.max(1, Math.round(hours * 60))} min left` : `${Math.round(hours)} h left`;
+}
+/** Stack Control stacks running this PR, or a link to launch one. Shown only with the Stack Control plugin. */
+const TONE_RANK = ["bad", "warn", "info", "good", "neutral"];
+/**
+ * The PR's test stack as one more figure in the summary card, from the Stack Control plugin: what to know first
+ * (failed, a service down, expiring, behind the PR, scenarios verified, or ready to test), coloured by it.
+ * Opens the stack, or Launch a stack when there is none. Hidden without Stack Control.
+ */
+function StackMetric({ stacks }: { stacks: Details["stacks"] | null | undefined }) {
+  if (!stacks?.available) return null;
+  const frame = "flex min-w-0 flex-col gap-0.5 rounded-lg px-3 py-2.5 text-left no-underline transition-colors duration-150 hover:bg-surface-recessed";
+  if (stacks.stacks.length === 0) {
+    if (!stacks.launchPath) return <Metric label="Test stack" value="None" note="No Stack Control stack runs this PR" />;
+    return (
+      <UrlLink href={stacks.launchPath} className={frame} title="Launch a Stack Control stack for this PR">
+        <span className="truncate text-xs text-muted-foreground">Test stack</span>
+        <span className="text-xl font-semibold leading-7 tracking-[-0.02em] text-muted-foreground">None</span>
+        <span className="text-xs font-medium leading-4 text-foreground underline underline-offset-2">Launch a stack</span>
+      </UrlLink>
+    );
+  }
+  const ranked = [...stacks.stacks].sort(
+    (a, b) => TONE_RANK.indexOf(a.headline?.tone ?? a.tone ?? "good") - TONE_RANK.indexOf(b.headline?.tone ?? b.tone ?? "good"),
+  );
+  const top = ranked[0]!;
+  const tone = (top.headline?.tone ?? top.tone ?? "good") as Tone;
+  const left = top.expiresAt ? timeLeft(top.expiresAt) : null;
+  const note = [top.name, left, stacks.stacks.length > 1 ? `+${stacks.stacks.length - 1} more` : null].filter(Boolean).join(" \u00b7 ");
+  return (
+    <UrlLink href={top.path} className={frame} title={`${top.headline?.detail ?? ""} Open ${top.name} in Stacks.`.trim()}>
+      <span className="truncate text-xs text-muted-foreground">Test stack</span>
+      <span className={cn("break-words text-xl font-semibold leading-7 tracking-[-0.02em]", TONE_TEXT[tone] || "text-foreground")}>
+        {top.headline?.text ?? top.healthShort ?? top.status}
+      </span>
+      <span className="truncate text-xs leading-4 text-muted-foreground">{note}</span>
+    </UrlLink>
+  );
+}
 function BriefingCard({
   briefing,
   busy,
@@ -624,6 +668,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     null,
   );
   const [prCanResolve, setPrCanResolve] = useState(false);
+  const [prStacks, setPrStacks] = useState<Details["stacks"] | null>(null);
   const [prBriefing, setPrBriefing] = useState<Details["briefing"] | null>(
     null,
   );
@@ -705,6 +750,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
     setPrFeedback(null);
     setPrCanResolve(false);
     setPrBriefing(null);
+    setPrStacks(null);
     setLivePr(null);
     setLiveError(null);
     if (!detailOpen) return;
@@ -749,6 +795,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
             setPrFeedback(result.feedback);
             setPrCanResolve(result.canResolve);
             setPrBriefing(result.briefing);
+            setPrStacks(result.stacks ?? null);
             setResolvedSelection(result.review);
             prTarget = result.review;
           }
@@ -2272,6 +2319,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       value="Not reviewed"
                       note="Opening Details never starts analysis"
                     />
+                    <StackMetric stacks={prStacks} />
                   </MetricRow>
                 </section>
                 {prBriefing && (
@@ -2569,6 +2617,7 @@ function PairReviewPage({ subPath }: { subPath: string }) {
                       note={freshness?.note}
                       tone={freshness?.tone ?? "neutral"}
                     />
+                    <StackMetric stacks={details.stacks} />
                   </MetricRow>
                   <Steps
                     label="Review progress"
